@@ -1,10 +1,6 @@
 #include "main.h"
-#include "timer.h"
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
-    GpuTimer timer;
-    timer.Start();
-
     int nBins = 1 << k; // 2^k
     int * hist = (int *)malloc(nBins * sizeof(int));
     int * histScan = (int *)malloc(nBins * sizeof(int));
@@ -57,7 +53,4 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     free(hist);
     free(histScan);
     free(originalSrc);
-
-    timer.Stop();
-    printf("Our Time: %.3f ms\n", timer.Elapsed());
 }

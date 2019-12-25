@@ -1,4 +1,5 @@
 #include "main.h"
+#include "timer.h"
 
 int main(int argc, char ** argv) {
     // PRINT OUT DEVICE INFO
@@ -31,11 +32,19 @@ int main(int argc, char ** argv) {
                                                 blockSizes[0], blockSizes[1]);
 
     // SORT BY THRUST
+    GpuTimer thrust_timer;
+    thrust_timer.Start();
     sortByThrust(in, n, thrustOut);
+    thrust_timer.Stop();
+    printf("Thrust's Time: %.3f ms\n", thrust_timer.Elapsed());
     // printArray(thrustOut, n);
     
     // SORT BY OUR IMPLEMENTATION
+    GpuTimer our_timer;
+    our_timer.Start();
     sort(in, n, out, k, blockSizes);
+    our_timer.Stop();
+    printf("Our Time: %.3f ms\n", our_timer.Elapsed());
     // printArray(out, n);
 
     checkCorrectness(out, thrustOut, n);
