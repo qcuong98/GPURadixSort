@@ -1,22 +1,5 @@
 #include "main.h"
 
-__global__ void computeHistKernel2(int * in, int n, int * hist, int nBins, int bit) {
-    extern __shared__ int s_hist[];
-    for (int idx = threadIdx.x; idx < nBins; idx += blockDim.x)
-        s_hist[idx] = 0;
-    __syncthreads();
-
-    // Each block computes its local hist using atomic on SMEM
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
-    if (i < n)
-        atomicAdd(&s_hist[(in[i] >> bit) & (nBins - 1)], 1);
-    __syncthreads();
-
-    // Each block adds its local hist to global hist using atomic on GMEM
-    for (int idx = threadIdx.x; idx < nBins; idx += blockDim.x)
-        atomicAdd(&hist[idx], s_hist[idx]);
-}
-
 __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * blkSums, int bit) {   
     extern __shared__ uint32_t s_in[];
     int id_in = blockDim.x * blockIdx.x + threadIdx.x;
@@ -48,21 +31,15 @@ __global__ void sumPrefixBlkKernel(uint32_t * out, int n, uint32_t * blkSums) {
     }
 }
 
-__global__ void reduceKernel(uint32_t * in, int n, uint32_t * out, int bit) {
-    int id_in = blockDim.x * blockIdx.x + threadIdx.x;
-    if (id_in < n)
-        out[id_in] -= ((in[id_in] >> bit) & 1);
-}
-
 void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, int bit) {
     dim3 gridSize((n - 1) / blkSize.x + 1);
 
     uint32_t * d_blkSums;
-    CHECK(cudaMalloc(&d_blkSums, gridSize.x * sizeof(int)));
+    CHECK(cudaMalloc(&d_blkSums, gridSize.x * sizeof(uint32_t)));
     uint32_t * d_sum_blkSums;
-    CHECK(cudaMalloc(&d_sum_blkSums, gridSize.x * sizeof(int)));
+    CHECK(cudaMalloc(&d_sum_blkSums, gridSize.x * sizeof(uint32_t)));
 
-    scanBlkKernel<<<gridSize, blkSize, 2 * blkSize.x * sizeof(int)>>>
+    scanBlkKernel<<<gridSize, blkSize, 2 * blkSize.x * sizeof(uint32_t)>>>
         (d_in, n, d_out, d_blkSums, bit);
     if (gridSize.x != 1) {
         computeScanArray(d_blkSums, d_sum_blkSums, gridSize.x, blkSize, -1);
@@ -71,6 +48,12 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, int 
 
     CHECK(cudaFree(d_sum_blkSums));
     CHECK(cudaFree(d_blkSums));
+}
+
+__global__ void reduceKernel(uint32_t * in, int n, uint32_t * out, int bit) {
+    int id_in = blockDim.x * blockIdx.x + threadIdx.x;
+    if (id_in < n)
+        out[id_in] -= ((in[id_in] >> bit) & 1);
 }
 
 __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, uint32_t* dst, int bit) {
@@ -84,8 +67,9 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, uint32_t
             dst[i - histScan[i]] = src[i];
     }
 }
+
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
-    uint32_t * histScan = (uint32_t *) malloc(n * sizeof(int));
+    uint32_t * histScan = (uint32_t *) malloc(n * sizeof(uint32_t));
 
     uint32_t * src = (uint32_t *)malloc(n * sizeof(uint32_t));
     memcpy(src, in, n * sizeof(uint32_t));
@@ -97,15 +81,13 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     CHECK(cudaMalloc(&d_src, n * sizeof(uint32_t)));
     CHECK(cudaMemcpy(d_src, src, n * sizeof(uint32_t), cudaMemcpyHostToDevice));
     CHECK(cudaMalloc(&d_dst, n * sizeof(uint32_t)));
-    CHECK(cudaMalloc(&d_histScan, n * sizeof(int)));
+    CHECK(cudaMalloc(&d_histScan, n * sizeof(uint32_t)));
 
-    // Compute block and grid size for histogram phase
-    dim3 blockSizeHist(blockSizes[0]);
-    dim3 gridSizeHist((n - 1) / blockSizes[0] + 1);
+    // Compute block and grid size for scan and scatter phase
     dim3 blockSizeScan(blockSizes[1]);
     dim3 gridSizeScan((n - 1) / blockSizes[1] + 1);
-    dim3 blockSizeScatter = blockSizeScan;
-    dim3 gridSizeScatter((n - 1) / blockSizeScatter.x + 1);
+    dim3 blockSizeScatter(blockSizes[2]);
+    dim3 gridSizeScatter((n - 1) / blockSizes[2] + 1);
 
     for (int bit = 0; bit < sizeof(uint32_t) * 8; ++bit) {
         computeScanArray(d_src, d_histScan, n, blockSizeScan, bit);
@@ -124,5 +106,6 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     free(originalSrc);
     
     CHECK(cudaFree(d_src));
+    CHECK(cudaFree(d_dst));
     CHECK(cudaFree(d_histScan));
 }

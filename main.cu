@@ -25,11 +25,12 @@ int main(int argc, char ** argv) {
     // printArray(in, n);
 
     // DETERMINE BLOCK SIZES
-    int blockSizes[2] = {512, 512}; // One for histogram, one for scan
+    int blockSizes[3]; // One for histogram, one for scan, one for scatter
     blockSizes[0] = atoi(argv[2]);
     blockSizes[1] = atoi(argv[3]);
-    printf("\nHist block size: %d, scan block size: %d\n", 
-                                                blockSizes[0], blockSizes[1]);
+    blockSizes[2] = atoi(argv[4]);
+    printf("\nHist block size: %d, scan block size %d, scatter block size: %d\n", 
+                                blockSizes[0], blockSizes[1], blockSizes[2]);
 
     // SORT BY THRUST
     GpuTimer thrust_timer;
