@@ -20,8 +20,9 @@ __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * b
         blkSums[blockIdx.x] = s_in[threadIdx.x + turn * blockDim.x];
     }
 
-    if (id_in < n)
+    if (id_in < n) {
         out[id_in] = s_in[threadIdx.x + turn * blockDim.x];
+    }
 }
 
 __global__ void sumPrefixBlkKernel(uint32_t * out, int n, uint32_t * blkSums) {
@@ -50,21 +51,15 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, int 
     CHECK(cudaFree(d_blkSums));
 }
 
-__global__ void reduceKernel(uint32_t * in, int n, uint32_t * out, int bit) {
-    int id_in = blockDim.x * blockIdx.x + threadIdx.x;
-    if (id_in < n)
-        out[id_in] -= ((in[id_in] >> bit) & 1);
-}
-
-__global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, uint32_t* dst, int bit) {
+__global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, uint32_t* dst, int bit, int n0) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < n) {
         if ((src[i] >> bit) & 1) {
-            int n0 = n - histScan[n - 1] - ((src[n - 1] >> bit) & 1);
             dst[n0 + histScan[i]] = src[i];
         }
-        else
+        else {
             dst[i - histScan[i]] = src[i];
+        }
     }
 }
 
@@ -91,8 +86,10 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
 
     for (int bit = 0; bit < sizeof(uint32_t) * 8; ++bit) {
         computeScanArray(d_src, d_histScan, n, blockSizeScan, bit);
-        reduceKernel<<<gridSizeScan, blockSizeScan>>>(d_src, n, d_histScan, bit);
-        scatterKernel<<<gridSizeScatter, blockSizeScatter>>>(d_src, n, d_histScan, d_dst, bit);
+        int n1;
+        CHECK(cudaMemcpy(&n1, d_histScan + n - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        int n0 = n - n1 - 1;
+        scatterKernel<<<gridSizeScatter, blockSizeScatter>>>(d_src, n, d_histScan, d_dst, bit, n0);
         CHECK(cudaDeviceSynchronize());
         
         uint32_t * tmp = d_src;
