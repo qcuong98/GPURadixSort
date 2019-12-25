@@ -1,6 +1,6 @@
 #include "main.h"
 
-__global__ void computeHistKernel2(int * in, int n, int * hist, int nBins, int bit) {
+__global__ void computeHistKernel2(uint32_t * in, int n, int * hist, int nBins, int bit) {
     extern __shared__ int s_hist[];
     for (int idx = threadIdx.x; idx < nBins; idx += blockDim.x)
         s_hist[idx] = 0;
@@ -82,7 +82,8 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     uint32_t * originalSrc = src; // Use originalSrc to free memory later
     uint32_t * dst = out;
 
-    int * d_src, * d_hist, * d_histScan;
+    uint32_t * d_src;
+    int * d_hist, * d_histScan;
     CHECK(cudaMalloc(&d_src, n * sizeof(uint32_t)));
     CHECK(cudaMalloc(&d_hist, nBins * sizeof(int)));
     CHECK(cudaMalloc(&d_histScan, nBins * sizeof(int)));
@@ -95,8 +96,8 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     size_t smemSizeHist = nBins * sizeof(int);
 
     for (int bit = 0; bit < sizeof(uint32_t) * 8; bit += k) {
-        CHECK(cudaMemcpy(d_src, src, n * sizeof(int), cudaMemcpyHostToDevice));
-        CHECK(cudaMemset(d_hist, 0, nBins * sizeof(uint32_t)));
+        CHECK(cudaMemcpy(d_src, src, n * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CHECK(cudaMemset(d_hist, 0, nBins * sizeof(int)));
 
         computeHistKernel2<<<gridSizeHist, blockSizeHist, smemSizeHist>>>
             (d_src, n, d_hist, nBins, bit);
