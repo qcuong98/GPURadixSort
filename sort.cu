@@ -2,38 +2,54 @@
 
 __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * blkSums, int bit) {   
     extern __shared__ uint32_t s_in[];
-    int id_in = blockDim.x * blockIdx.x + threadIdx.x;
-    s_in[threadIdx.x] = id_in < n ? (bit < 0 ? in[id_in] : ((in[id_in] >> bit) & 1)) : 0;
+    int id_in = (blockDim.x * blockIdx.x + threadIdx.x) * 2;
+    s_in[threadIdx.x * 2] = id_in < n ? (bit < 0 ? in[id_in] : ((in[id_in] >> bit) & 1)) : 0;
+    s_in[threadIdx.x * 2 + 1] = id_in + 1 < n ? (bit < 0 ? in[id_in + 1] : ((in[id_in + 1] >> bit) & 1)) : 0;
     __syncthreads();
 
-    int turn = 0;
-    for (int stride = 1; stride < blockDim.x; stride <<= 1) {
-        turn ^= 1;
-        int cur = s_in[threadIdx.x + (turn ^ 1) * blockDim.x];
-        if (threadIdx.x >= stride)
-            cur += s_in[threadIdx.x - stride + (turn ^ 1) * blockDim.x]; 
-        s_in[threadIdx.x + turn * blockDim.x] = cur;
+    // reduction phase
+    for (int stride = 1; stride <= blockDim.x; stride <<= 1) {
+        if (threadIdx.x < blockDim.x / stride) {
+            int pos = 2 * stride * (threadIdx.x + 1) - 1;
+            s_in[pos] += s_in[pos - stride];
+        }
+        __syncthreads();
+    }
+    // post-reduction phase
+    for (int stride = blockDim.x >> 1; stride >= 1; stride >>= 1) {
+        if (threadIdx.x < blockDim.x / stride - 1) {
+            int pos = 2 * stride * (threadIdx.x + 1) + stride - 1;
+            s_in[pos] += s_in[pos - stride];
+        }
         __syncthreads();
     }
 
     if (threadIdx.x == blockDim.x - 1) { // last thread
-        blkSums[blockIdx.x] = s_in[threadIdx.x + turn * blockDim.x];
+        blkSums[blockIdx.x] = s_in[2 * threadIdx.x + 1];
     }
 
     if (id_in < n) {
-        out[id_in] = s_in[threadIdx.x + turn * blockDim.x];
+        out[id_in] = s_in[2 * threadIdx.x];
+    }
+    if (id_in + 1 < n) {
+        out[id_in + 1] = s_in[2 * threadIdx.x + 1];
     }
 }
 
 __global__ void sumPrefixBlkKernel(uint32_t * out, int n, uint32_t * blkSums) {
-    int id_in = blockDim.x * blockIdx.x + threadIdx.x;
-    if (id_in < n && blockIdx.x > 0) {
-        out[id_in] += blkSums[blockIdx.x - 1];
+    int id_in = 2 * (blockDim.x * blockIdx.x + threadIdx.x);
+    if (blockIdx.x > 0) {
+        if (id_in < n) {
+            out[id_in] += blkSums[blockIdx.x - 1];
+        }
+        if (id_in + 1 < n) {
+            out[id_in + 1] += blkSums[blockIdx.x - 1];
+        }
     }
 }
 
 void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, int bit) {
-    dim3 gridSize((n - 1) / blkSize.x + 1);
+    dim3 gridSize((n - 1) / (2 * blkSize.x) + 1);
 
     uint32_t * d_blkSums;
     CHECK(cudaMalloc(&d_blkSums, gridSize.x * sizeof(uint32_t)));
@@ -81,7 +97,6 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
 
     // Compute block and grid size for scan and scatter phase
     dim3 blockSizeScan(blockSizes[1]);
-    dim3 gridSizeScan((n - 1) / blockSizes[1] + 1);
     dim3 blockSizeScatter(blockSizes[2]);
     dim3 gridSizeScatter((n - 1) / blockSizes[2] + 1);
 
