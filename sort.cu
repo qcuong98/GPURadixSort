@@ -54,11 +54,12 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, int 
 __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, uint32_t* dst, int bit, int n0) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < n) {
-        if ((src[i] >> bit) & 1) {
-            dst[n0 + histScan[i]] = src[i];
+        int val = src[i];
+        if (val >> bit & 1) {
+            dst[n0 + histScan[i]] = val;
         }
         else {
-            dst[i - histScan[i]] = src[i];
+            dst[i - histScan[i]] = val;
         }
     }
 }
