@@ -56,26 +56,19 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, uint32_t
     if (i < n) {
         int val = src[i];
         if (val >> bit & 1) {
-            dst[n0 + histScan[i]] = val;
-        }
-        else {
+            dst[n0 + histScan[i] - 1] = val;
+        } else {
             dst[i - histScan[i]] = val;
         }
     }
 }
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
-    uint32_t * histScan = (uint32_t *) malloc(n * sizeof(uint32_t));
-
-    uint32_t * src = (uint32_t *)malloc(n * sizeof(uint32_t));
-    memcpy(src, in, n * sizeof(uint32_t));
-    uint32_t * originalSrc = src; // Use originalSrc to free memory later
-
     uint32_t * d_src;
     uint32_t * d_dst;
     uint32_t * d_histScan;
     CHECK(cudaMalloc(&d_src, n * sizeof(uint32_t)));
-    CHECK(cudaMemcpy(d_src, src, n * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_src, in, n * sizeof(uint32_t), cudaMemcpyHostToDevice));
     CHECK(cudaMalloc(&d_dst, n * sizeof(uint32_t)));
     CHECK(cudaMalloc(&d_histScan, n * sizeof(uint32_t)));
 
@@ -89,7 +82,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
         computeScanArray(d_src, d_histScan, n, blockSizeScan, bit);
         int n1;
         CHECK(cudaMemcpy(&n1, d_histScan + n - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-        int n0 = n - n1 - 1;
+        int n0 = n - n1;
         scatterKernel<<<gridSizeScatter, blockSizeScatter>>>(d_src, n, d_histScan, d_dst, bit, n0);
         CHECK(cudaDeviceSynchronize());
         
@@ -99,9 +92,6 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     }
 
     CHECK(cudaMemcpy(out, d_src, n * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-
-    free(histScan);
-    free(originalSrc);
     
     CHECK(cudaFree(d_src));
     CHECK(cudaFree(d_dst));
