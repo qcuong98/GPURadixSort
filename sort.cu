@@ -32,23 +32,17 @@ __global__ void sumPrefixBlkKernel(uint32_t * out, int n, uint32_t * blkSums) {
     }
 }
 
-void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, int bit) {
+void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, 
+        uint32_t* d_blkSums[], uint32_t* d_sum_blkSums[], int turn, int bit) {
     dim3 gridSize((n - 1) / blkSize.x + 1);
 
-    uint32_t * d_blkSums;
-    CHECK(cudaMalloc(&d_blkSums, gridSize.x * sizeof(uint32_t)));
-    uint32_t * d_sum_blkSums;
-    CHECK(cudaMalloc(&d_sum_blkSums, gridSize.x * sizeof(uint32_t)));
-
     scanBlkKernel<<<gridSize, blkSize, 2 * blkSize.x * sizeof(uint32_t)>>>
-        (d_in, n, d_out, d_blkSums, bit);
+        (d_in, n, d_out, d_blkSums[turn], bit);
     if (gridSize.x != 1) {
-        computeScanArray(d_blkSums, d_sum_blkSums, gridSize.x, blkSize, -1);
+        computeScanArray(d_blkSums[turn], d_sum_blkSums[turn], gridSize.x, 
+                            blkSize, d_blkSums, d_sum_blkSums, turn + 1, -1);
     }
-    sumPrefixBlkKernel<<<gridSize, blkSize>>>(d_out, n, d_sum_blkSums);
-
-    CHECK(cudaFree(d_sum_blkSums));
-    CHECK(cudaFree(d_blkSums));
+    sumPrefixBlkKernel<<<gridSize, blkSize>>>(d_out, n, d_sum_blkSums[turn]);
 }
 
 __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, uint32_t* dst, int bit, int n0) {
@@ -57,8 +51,7 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, uint32_t
         int val = src[i];
         if (val >> bit & 1) {
             dst[n0 + histScan[i]] = val;
-        }
-        else {
+        } else {
             dst[i - histScan[i]] = val;
         }
     }
@@ -79,14 +72,33 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     CHECK(cudaMalloc(&d_dst, n * sizeof(uint32_t)));
     CHECK(cudaMalloc(&d_histScan, n * sizeof(uint32_t)));
 
-    // Compute block and grid size for scan and scatter phase
+    // sompute block and grid size for scan and scatter phase
     dim3 blockSizeScan(blockSizes[1]);
     dim3 gridSizeScan((n - 1) / blockSizes[1] + 1);
     dim3 blockSizeScatter(blockSizes[2]);
     dim3 gridSizeScatter((n - 1) / blockSizes[2] + 1);
 
+    int blkSize = blockSizeScan.x, gridSize = n;
+    int cnt_layer = 0;
+    do {
+        ++cnt_layer;
+        gridSize = (gridSize - 1) / blkSize + 1;
+    } while (gridSize != 1);
+
+    // scan array
+    uint32_t ** d_blkSums = (uint32_t **) malloc(cnt_layer * sizeof(uint32_t *));
+    uint32_t ** d_sum_blkSums = (uint32_t **) malloc(cnt_layer * sizeof(uint32_t *));
+    gridSize = n;
+    cnt_layer = 0;
+    do {
+        ++cnt_layer;
+        gridSize = (gridSize - 1) / blkSize + 1;
+        CHECK(cudaMalloc(&d_blkSums[cnt_layer - 1], gridSize * sizeof(uint32_t)));
+        CHECK(cudaMalloc(&d_sum_blkSums[cnt_layer - 1], gridSize * sizeof(uint32_t)));
+    } while (gridSize != 1);
+
     for (int bit = 0; bit < sizeof(uint32_t) * 8; ++bit) {
-        computeScanArray(d_src, d_histScan, n, blockSizeScan, bit);
+        computeScanArray(d_src, d_histScan, n, blockSizeScan, d_blkSums, d_sum_blkSums, 0, bit);
         int n1;
         CHECK(cudaMemcpy(&n1, d_histScan + n - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost));
         int n0 = n - n1 - 1;
@@ -99,11 +111,17 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     }
 
     CHECK(cudaMemcpy(out, d_src, n * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-
-    free(histScan);
-    free(originalSrc);
     
     CHECK(cudaFree(d_src));
     CHECK(cudaFree(d_dst));
     CHECK(cudaFree(d_histScan));
+    for (int i = 0; i < cnt_layer; ++i) {
+        CHECK(cudaFree(d_blkSums[i]));
+        CHECK(cudaFree(d_sum_blkSums[i]));
+    }
+
+    free(d_blkSums);
+    free(d_sum_blkSums);
+    free(histScan);
+    free(originalSrc);
 }
