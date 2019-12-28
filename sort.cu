@@ -30,7 +30,7 @@ __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * b
     int turn = 0;
     for (int stride = 1; stride < blockDim.x; stride <<= 1) {
         turn ^= 1;
-        int cur = s_in[threadIdx.x + (turn ^ 1) * blockDim.x];
+        uint32_t cur = s_in[threadIdx.x + (turn ^ 1) * blockDim.x];
         if (threadIdx.x >= stride)
             cur += s_in[threadIdx.x - stride + (turn ^ 1) * blockDim.x]; 
         s_in[threadIdx.x + turn * blockDim.x] = cur;
@@ -87,7 +87,7 @@ __device__ void sortLocal(uint32_t* src, uint32_t* scan, int bit, int k) {
         int turn = 0;
         for (int stride = 1; stride < blockDim.x; stride <<= 1) {
             turn ^= 1;
-            int cur = scan[threadIdx.x + (turn ^ 1) * blockDim.x];
+            uint32_t cur = scan[threadIdx.x + (turn ^ 1) * blockDim.x];
             if (threadIdx.x >= stride)
                 cur += scan[threadIdx.x - stride + (turn ^ 1) * blockDim.x]; 
             scan[threadIdx.x + turn * blockDim.x] = cur;
