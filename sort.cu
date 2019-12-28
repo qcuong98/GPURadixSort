@@ -1,17 +1,27 @@
 #include "main.h"
 
+#define NUM_BANKS 32
+#define LOG_NUM_BANKS 5
+#define CONFLICT_FREE_OFFSET(n) \
+        ((n) >> NUM_BANKS + (n) >> (2 * LOG_NUM_BANKS)) 
+        
 __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * blkSums, int bit) {   
     extern __shared__ uint32_t s_in[];
-    int id_in = (blockDim.x * blockIdx.x + threadIdx.x) * 2;
-    s_in[threadIdx.x * 2] = id_in < n ? (bit < 0 ? in[id_in] : ((in[id_in] >> bit) & 1)) : 0;
-    s_in[threadIdx.x * 2 + 1] = id_in + 1 < n ? (bit < 0 ? in[id_in + 1] : ((in[id_in + 1] >> bit) & 1)) : 0;
+    int id_ai = 2 * blockDim.x * blockIdx.x + threadIdx.x;
+    int id_bi = 2 * blockDim.x * blockIdx.x + threadIdx.x + blockDim.x;
+    int ai = threadIdx.x;
+    int bi = threadIdx.x + blockDim.x;
+    int bankOffsetA = CONFLICT_FREE_OFFSET(ai);
+    int bankOffsetB = CONFLICT_FREE_OFFSET(bi);
+    s_in[ai + bankOffsetA] = id_ai < n ? (bit < 0 ? in[id_ai] : ((in[id_ai] >> bit) & 1)) : 0;
+    s_in[bi + bankOffsetB] = id_bi < n ? (bit < 0 ? in[id_bi] : ((in[id_bi] >> bit) & 1)) : 0;
     __syncthreads();
 
     // reduction phase
     for (int stride = 1; stride <= blockDim.x; stride <<= 1) {
         if (threadIdx.x < blockDim.x / stride) {
             int pos = 2 * stride * (threadIdx.x + 1) - 1;
-            s_in[pos] += s_in[pos - stride];
+            s_in[pos + CONFLICT_FREE_OFFSET(pos)] += s_in[pos - stride + CONFLICT_FREE_OFFSET(pos - stride)];
         }
         __syncthreads();
     }
@@ -19,20 +29,20 @@ __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * b
     for (int stride = blockDim.x >> 1; stride >= 1; stride >>= 1) {
         if (threadIdx.x < blockDim.x / stride - 1) {
             int pos = 2 * stride * (threadIdx.x + 1) + stride - 1;
-            s_in[pos] += s_in[pos - stride];
+            s_in[pos + CONFLICT_FREE_OFFSET(pos)] += s_in[pos - stride + CONFLICT_FREE_OFFSET(pos - stride)];
         }
         __syncthreads();
     }
 
     if (threadIdx.x == blockDim.x - 1) { // last thread
-        blkSums[blockIdx.x] = s_in[2 * threadIdx.x + 1];
+        blkSums[blockIdx.x] = s_in[bi + bankOffsetB];
     }
 
-    if (id_in < n) {
-        out[id_in] = s_in[2 * threadIdx.x];
+    if (id_ai < n) {
+        out[id_ai] = s_in[ai + bankOffsetA];
     }
-    if (id_in + 1 < n) {
-        out[id_in + 1] = s_in[2 * threadIdx.x + 1];
+    if (id_bi < n) {
+        out[id_bi] = s_in[bi + bankOffsetB];
     }
 }
 
