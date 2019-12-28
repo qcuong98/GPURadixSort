@@ -93,15 +93,15 @@ __device__ void sortLocal(uint32_t* src, uint32_t* scan, int bit, int k) {
             scan[threadIdx.x + turn * blockDim.x] = cur;
             __syncthreads();
         }
-        
+
         // scatter
         int n0 = blockDim.x - scan[blockDim.x - 1 + turn * blockDim.x];
-        
+
         if ((val >> blockBit) & 1)
             src[n0 + scan[threadIdx.x + turn * blockDim.x] - 1] = val;
         else
             src[threadIdx.x - scan[threadIdx.x + turn * blockDim.x]] = val;
-        
+
         __syncthreads();
     }
 }
@@ -114,7 +114,7 @@ __device__ uint32_t* countEqualBefore(uint32_t* src, uint32_t* buffer, int bit, 
     for (int stride = 1; stride < blockDim.x; stride <<= 1) {
         turn ^= 1;
         uint32_t cur = buffer[threadIdx.x + (turn ^ 1) * blockDim.x];
-        if (threadIdx.x >= stride &&  thisBin == getBin(src[threadIdx.x - stride], bit, nBins))
+        if (threadIdx.x >= stride && thisBin == getBin(src[threadIdx.x - stride], bit, nBins))
             cur += buffer[threadIdx.x - stride + (turn ^ 1) * blockDim.x]; 
         buffer[threadIdx.x + turn * blockDim.x] = cur;
         __syncthreads();
@@ -127,7 +127,7 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, i
     extern __shared__ uint32_t s[];
     uint32_t* localSrc = s;
     uint32_t* localScan = localSrc + blockDim.x;
-    
+
     localSrc[threadIdx.x] = i < n ? src[i] : UINT_MAX;
 
     // sort locally using radix sort with k = 1
@@ -135,16 +135,31 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, i
 
     // count equals before
     uint32_t* count = countEqualBefore(localSrc, localScan, bit, nBins); 
-    
+
     // scatter
     uint32_t pos =
-        histScan[blockIdx.x + getBin(localSrc[threadIdx.x], bit, nBins) * gridSize]
+        histScan[blockIdx.x * nBins + getBin(localSrc[threadIdx.x], bit, nBins)]
         + count[threadIdx.x]
         - 1;
-    
+
     if (pos < n) {
         dst[pos] = localSrc[threadIdx.x];
     }
+}
+
+__global__ void transpose(uint32_t *iMatrix, uint32_t *oMatrix, int rows, int cols)
+{
+    __shared__ int s_blkData[32][33];
+    // Each block load data efficiently from GMEM to SMEM
+    int iR = blockIdx.x * blockDim.x + threadIdx.y;
+    int iC = blockIdx.y * blockDim.y + threadIdx.x;
+    s_blkData[threadIdx.y][threadIdx.x] = (iR < rows && iC < cols) ? iMatrix[iR * cols + iC] : 0;
+    __syncthreads();
+    // Each block write data efficiently from SMEM to GMEM
+    int oR = blockIdx.y * blockDim.y + threadIdx.y;
+    int oC = blockIdx.x * blockDim.x + threadIdx.x;
+    if (oR < cols && oC < rows)
+        oMatrix[oR * rows + oC] = s_blkData[threadIdx.x][threadIdx.y];
 }
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
@@ -164,30 +179,37 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     dim3 gridSizeScan((n - 1) / blockSizeScan.x + 1);
     dim3 blockSizeScatter(blockSizes[2]);
     dim3 gridSizeScatter((n - 1) / blockSizeScatter.x + 1);
+    dim3 blockSizeTranspose(32, 32);
+    dim3 gridSizeTranspose((nBins - 1) / blockSizeTranspose.x + 1, (gridSizeHist.x - 1) / blockSizeTranspose.x + 1);
 
     int histSize = nBins * gridSizeHist.x;
     CHECK(cudaMalloc(&d_hist, histSize * sizeof(uint32_t)));
-    CHECK(cudaMalloc(&d_histScan, histSize * sizeof(uint32_t)));
+    CHECK(cudaMalloc(&d_histScan, 2 * histSize * sizeof(uint32_t)));
 
     for (int bit = 0; bit < sizeof(uint32_t) * 8; bit += k) {
+//         printf("bit = %d\n", bit);
         // compute hist
         computeHistKernel<<<gridSizeHist, blockSizeHist, nBins * sizeof(uint32_t)>>>
             (d_src, n, d_hist, nBins, bit, gridSizeHist.x);
-        
+
         // compute hist scan
-        computeScanArray(d_hist, d_histScan, histSize, blockSizeScan);
+        computeScanArray(d_hist, d_histScan + histSize, histSize, blockSizeScan);
         reduceKernel<<<gridSizeScan, blockSizeScan>>>
-            (d_hist, histSize, d_histScan);
-        
+            (d_hist, histSize, d_histScan + histSize);
+
+        // transpose histScan
+        transpose<<<gridSizeTranspose, blockSizeTranspose>>>(d_histScan + histSize, d_histScan, nBins, gridSizeHist.x);
+//         checkTranspose(d_histScan + histSize, d_histScan, nBins, gridSizeHist.x);
+
         // scatter
         scatterKernel<<<gridSizeScatter, blockSizeScatter, (3 * blockSizeScatter.x) * sizeof(uint32_t)>>>
             (d_src, n, d_histScan, k, nBins, d_dst, bit, gridSizeHist.x);
-        
+
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
     }
 
     CHECK(cudaMemcpy(out, d_src, n * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    
+
     CHECK(cudaFree(d_src));
     CHECK(cudaFree(d_dst));
     CHECK(cudaFree(d_hist));
