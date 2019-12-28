@@ -19,7 +19,7 @@ void printDeviceInfo() {
 void checkCorrectness(uint32_t * out, uint32_t * correctOut, int n) {
     for (int i = 0; i < n; i++) {
         if (out[i] != correctOut[i]) {
-            printf("INCORRECT :(\n");
+            printf("INCORRECT at %d: %u vs %u :(\n", i, out[i], correctOut[i]);
             return;
         }
     }
