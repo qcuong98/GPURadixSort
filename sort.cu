@@ -6,22 +6,23 @@ __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * b
     s_in[threadIdx.x] = id_in < n ? (bit < 0 ? in[id_in] : ((in[id_in] >> bit) & 1)) : 0;
     __syncthreads();
 
-    int turn = 0;
+    int tmp;
     for (int stride = 1; stride < blockDim.x; stride <<= 1) {
-        turn ^= 1;
-        int cur = s_in[threadIdx.x + (turn ^ 1) * blockDim.x];
+        if (threadIdx.x >= stride) {
+            tmp = s_in[threadIdx.x - stride];
+        }
+        __syncthreads();
         if (threadIdx.x >= stride)
-            cur += s_in[threadIdx.x - stride + (turn ^ 1) * blockDim.x]; 
-        s_in[threadIdx.x + turn * blockDim.x] = cur;
+            s_in[threadIdx.x] += tmp;
         __syncthreads();
     }
 
     if (threadIdx.x == blockDim.x - 1) { // last thread
-        blkSums[blockIdx.x] = s_in[threadIdx.x + turn * blockDim.x];
+        blkSums[blockIdx.x] = s_in[threadIdx.x];
     }
 
     if (id_in < n) {
-        out[id_in] = s_in[threadIdx.x + turn * blockDim.x];
+        out[id_in] = s_in[threadIdx.x];
     }
 }
 
@@ -40,7 +41,7 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, int 
     uint32_t * d_sum_blkSums;
     CHECK(cudaMalloc(&d_sum_blkSums, gridSize.x * sizeof(uint32_t)));
 
-    scanBlkKernel<<<gridSize, blkSize, 2 * blkSize.x * sizeof(uint32_t)>>>
+    scanBlkKernel<<<gridSize, blkSize, blkSize.x * sizeof(uint32_t)>>>
         (d_in, n, d_out, d_blkSums, bit);
     if (gridSize.x != 1) {
         computeScanArray(d_blkSums, d_sum_blkSums, gridSize.x, blkSize, -1);
