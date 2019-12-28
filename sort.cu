@@ -78,8 +78,9 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize) {
     CHECK(cudaFree(d_blkSums));
 }
 
-__device__ uint32_t* sortLocal(uint32_t* src, uint32_t* dst, uint32_t* scan, int bit, int k) {
+__device__ void sortLocal(uint32_t* src, uint32_t* scan, int bit, int k) {
     for (int blockBit = bit; blockBit < bit + k; ++blockBit) {
+        uint32_t val = src[threadIdx.x];
         // compute scan
         scan[threadIdx.x] = (src[threadIdx.x] >> blockBit) & 1;
         __syncthreads();
@@ -95,16 +96,14 @@ __device__ uint32_t* sortLocal(uint32_t* src, uint32_t* dst, uint32_t* scan, int
         
         // scatter
         int n0 = blockDim.x - scan[blockDim.x - 1 + turn * blockDim.x];
-        uint32_t val = src[threadIdx.x];
-        if ((val >> blockBit) & 1)
-            dst[n0 + scan[threadIdx.x + turn * blockDim.x] - 1] = val;
-        else
-            dst[threadIdx.x - scan[threadIdx.x + turn * blockDim.x]] = val;
         
-        uint32_t* tmp = src; src = dst; dst = tmp;
+        if ((val >> blockBit) & 1)
+            src[n0 + scan[threadIdx.x + turn * blockDim.x] - 1] = val;
+        else
+            src[threadIdx.x - scan[threadIdx.x + turn * blockDim.x]] = val;
+        
         __syncthreads();
     }
-    return src;
 }
 
 __device__ uint32_t* countEqualBefore(uint32_t* src, uint32_t* buffer, int bit, int nBins) {
@@ -127,25 +126,24 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, i
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     extern __shared__ uint32_t s[];
     uint32_t* localSrc = s;
-    uint32_t* localDst = s + blockDim.x;
-    uint32_t* localScan = localDst + blockDim.x;
+    uint32_t* localScan = localSrc + blockDim.x;
     
     localSrc[threadIdx.x] = i < n ? src[i] : UINT_MAX;
 
     // sort locally using radix sort with k = 1
-    uint32_t* sorted = sortLocal(localSrc, localDst, localScan, bit, k);
+    sortLocal(localSrc, localScan, bit, k);
 
     // count equals before
-    uint32_t* count = countEqualBefore(sorted, localScan, bit, nBins); 
+    uint32_t* count = countEqualBefore(localSrc, localScan, bit, nBins); 
     
     // scatter
     uint32_t pos =
-        histScan[blockIdx.x + getBin(sorted[threadIdx.x], bit, nBins) * gridSize]
+        histScan[blockIdx.x + getBin(localSrc[threadIdx.x], bit, nBins) * gridSize]
         + count[threadIdx.x]
         - 1;
     
     if (pos < n) {
-        dst[pos] = sorted[threadIdx.x];
+        dst[pos] = localSrc[threadIdx.x];
     }
 }
 
@@ -182,7 +180,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
             (d_hist, histSize, d_histScan);
         
         // scatter
-        scatterKernel<<<gridSizeScatter, blockSizeScatter, (4 * blockSizeScatter.x) * sizeof(uint32_t)>>>
+        scatterKernel<<<gridSizeScatter, blockSizeScatter, (3 * blockSizeScatter.x) * sizeof(uint32_t)>>>
             (d_src, n, d_histScan, k, nBins, d_dst, bit, gridSizeHist.x);
         
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
