@@ -128,13 +128,9 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, i
     extern __shared__ uint32_t s[];
     uint32_t* localSrc = s;
     uint32_t* localDst = s + blockDim.x;
-    uint32_t* localHist = localDst + blockDim.x;
-    uint32_t* localScan = localHist + nBins;
+    uint32_t* localScan = localDst + blockDim.x;
     
     localSrc[threadIdx.x] = i < n ? src[i] : UINT_MAX;
-    for (int bin = threadIdx.x; bin < nBins; bin += blockDim.x) {
-        localHist[bin] = histScan[blockIdx.x + bin * gridSize];
-    }
 
     // sort locally using radix sort with k = 1
     uint32_t* sorted = sortLocal(localSrc, localDst, localScan, bit, k);
@@ -144,7 +140,7 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, i
     
     // scatter
     uint32_t pos =
-        localHist[getBin(sorted[threadIdx.x], bit, nBins)]
+        histScan[blockIdx.x + getBin(sorted[threadIdx.x], bit, nBins) * gridSize]
         + count[threadIdx.x]
         - 1;
     
@@ -167,9 +163,9 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     dim3 blockSizeHist(blockSizes[0]);
     dim3 gridSizeHist((n - 1) / blockSizeHist.x + 1);
     dim3 blockSizeScan(blockSizes[1]);
-    dim3 gridSizeScan((n - 1) / blockSizes[1] + 1);
+    dim3 gridSizeScan((n - 1) / blockSizeScan.x + 1);
     dim3 blockSizeScatter(blockSizes[2]);
-    dim3 gridSizeScatter((n - 1) / blockSizes[2] + 1);
+    dim3 gridSizeScatter((n - 1) / blockSizeScatter.x + 1);
 
     int histSize = nBins * gridSizeHist.x;
     CHECK(cudaMalloc(&d_hist, histSize * sizeof(uint32_t)));
@@ -186,7 +182,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
             (d_hist, histSize, d_histScan);
         
         // scatter
-        scatterKernel<<<gridSizeScatter, blockSizeScatter, (4 * blockSizeScatter.x + nBins) * sizeof(uint32_t)>>>
+        scatterKernel<<<gridSizeScatter, blockSizeScatter, (4 * blockSizeScatter.x) * sizeof(uint32_t)>>>
             (d_src, n, d_histScan, k, nBins, d_dst, bit, gridSizeHist.x);
         
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
