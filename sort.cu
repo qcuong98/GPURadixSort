@@ -78,14 +78,17 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize) {
     CHECK(cudaFree(d_blkSums));
 }
 
+#define LOG_NUM_BANKS 5
+#define CONFLICT_FREE_OFFSET(n) ((n) + ((n) >> LOG_NUM_BANKS))
+
 __device__ void sortLocal(uint32_t* src, uint32_t* scan, int bit, int k, int ai, int bi) {
     for (int blockBit = bit; blockBit < bit + k; ++blockBit) {
-        uint32_t val_a = src[ai];
-        uint32_t val_b = src[bi];
+        uint32_t val_a = src[CONFLICT_FREE_OFFSET(ai)];
+        uint32_t val_b = src[CONFLICT_FREE_OFFSET(bi)];
 
         // compute scan
-        scan[ai] = (src[ai] >> blockBit) & 1;
-        scan[bi] = (src[bi] >> blockBit) & 1;
+        scan[CONFLICT_FREE_OFFSET(ai)] = (src[CONFLICT_FREE_OFFSET(ai)] >> blockBit) & 1;
+        scan[CONFLICT_FREE_OFFSET(bi)] = (src[CONFLICT_FREE_OFFSET(bi)] >> blockBit) & 1;
         __syncthreads();
 
         // reduction phase
@@ -93,47 +96,47 @@ __device__ void sortLocal(uint32_t* src, uint32_t* scan, int bit, int k, int ai,
             if (threadIdx.x < d) {
                 int cur = 2 * stride * (threadIdx.x + 1) - 1;
                 int prev = cur - stride;
-                scan[cur] += scan[prev];
+                scan[CONFLICT_FREE_OFFSET(cur)] += scan[CONFLICT_FREE_OFFSET(prev)];
             }
             __syncthreads();
         }
         // post-reduction phase
         for (int stride = blockDim.x >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
             if (threadIdx.x < d - 1) {
-                int cur = 2 * stride * (threadIdx.x + 1) + stride - 1;
-                int prev = cur - stride;
-                scan[cur] += scan[prev];
+                int prev = 2 * stride * (threadIdx.x + 1) - 1;
+                int cur = prev + stride;
+                scan[CONFLICT_FREE_OFFSET(cur)] += scan[CONFLICT_FREE_OFFSET(prev)];
             }
             __syncthreads();
         }
         
         // scatter
-        int n0 = 2 * blockDim.x - scan[2 * blockDim.x - 1];
+        int n0 = 2 * blockDim.x - scan[CONFLICT_FREE_OFFSET(2 * blockDim.x - 1)];
         
         if ((val_a >> blockBit) & 1)
-            src[n0 + scan[ai] - 1] = val_a;
+            src[CONFLICT_FREE_OFFSET(n0 + scan[CONFLICT_FREE_OFFSET(ai)] - 1)] = val_a;
         else
-            src[ai - scan[ai]] = val_a;
+            src[CONFLICT_FREE_OFFSET(ai - scan[CONFLICT_FREE_OFFSET(ai)])] = val_a;
 
         if ((val_b >> blockBit) & 1)
-            src[n0 + scan[bi] - 1] = val_b;
+            src[CONFLICT_FREE_OFFSET(n0 + scan[CONFLICT_FREE_OFFSET(bi)] - 1)] = val_b;
         else
-            src[bi - scan[bi]] = val_b;
+            src[CONFLICT_FREE_OFFSET(bi - scan[CONFLICT_FREE_OFFSET(bi)])] = val_b;
         
         __syncthreads();
     }
 }
 
 __device__ void countEqualBefore(uint32_t* src, uint32_t* buffer, int bit, int nBins, int ai, int bi) {
-    buffer[ai] = 1;
-    buffer[bi] = 1;
+    buffer[CONFLICT_FREE_OFFSET(ai)] = 1;
+    buffer[CONFLICT_FREE_OFFSET(bi)] = 1;
     __syncthreads();
     // reduction phase
     for (int stride = 1, d = blockDim.x; stride <= blockDim.x; stride <<= 1, d >>= 1) {
         int cur = 2 * stride * (threadIdx.x + 1) - 1;
         int prev = cur - stride;
-        if (threadIdx.x < d && getBin(src[cur], bit, nBins) == getBin(src[prev], bit, nBins)) {
-            buffer[cur] += buffer[prev];
+        if (threadIdx.x < d && getBin(src[CONFLICT_FREE_OFFSET(cur)], bit, nBins) == getBin(src[CONFLICT_FREE_OFFSET(prev)], bit, nBins)) {
+            buffer[CONFLICT_FREE_OFFSET(cur)] += buffer[CONFLICT_FREE_OFFSET(prev)];
         }
         __syncthreads();
     }
@@ -141,8 +144,8 @@ __device__ void countEqualBefore(uint32_t* src, uint32_t* buffer, int bit, int n
     for (int stride = blockDim.x >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
         int cur = 2 * stride * (threadIdx.x + 1) + stride - 1;
         int prev = cur - stride;
-        if (threadIdx.x < d - 1 && getBin(src[cur], bit, nBins) == getBin(src[prev], bit, nBins)) {
-            buffer[cur] += buffer[prev];
+        if (threadIdx.x < d - 1 && getBin(src[CONFLICT_FREE_OFFSET(cur)], bit, nBins) == getBin(src[CONFLICT_FREE_OFFSET(prev)], bit, nBins)) {
+            buffer[CONFLICT_FREE_OFFSET(cur)] += buffer[CONFLICT_FREE_OFFSET(prev)];
         }
         __syncthreads();
     }
@@ -151,14 +154,14 @@ __device__ void countEqualBefore(uint32_t* src, uint32_t* buffer, int bit, int n
 __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, int nBins, uint32_t* dst, int bit, int gridSize) {
     extern __shared__ uint32_t s[];
     uint32_t* localSrc = s;
-    uint32_t* localScan = localSrc + 2 * blockDim.x;
+    uint32_t* localScan = localSrc + 3 * blockDim.x;
 
     int id_ai = 2 * blockDim.x * blockIdx.x + 2 * threadIdx.x;
     int id_bi = 2 * blockDim.x * blockIdx.x + 2 * threadIdx.x + 1;
     int ai = 2 * threadIdx.x;
     int bi = 2 * threadIdx.x + 1;
-    localSrc[ai] = id_ai < n ? src[id_ai] : UINT_MAX;
-    localSrc[bi] = id_bi < n ? src[id_bi] : UINT_MAX;
+    localSrc[CONFLICT_FREE_OFFSET(ai)] = id_ai < n ? src[id_ai] : UINT_MAX;
+    localSrc[CONFLICT_FREE_OFFSET(bi)] = id_bi < n ? src[id_bi] : UINT_MAX;
     __syncthreads();
 
     // sort locally using radix sort with k = 1
@@ -169,14 +172,18 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, i
     
     // scatter
     uint32_t pos;
-    pos = histScan[blockIdx.x + getBin(localSrc[ai], bit, nBins) * gridSize] + localScan[ai] - 1;
+    pos = histScan[blockIdx.x + getBin(localSrc[CONFLICT_FREE_OFFSET(ai)], bit, nBins) * gridSize] + localScan[CONFLICT_FREE_OFFSET(ai)] - 1;
     if (pos < n) {
-        dst[pos] = localSrc[ai];
+        dst[pos] = localSrc[CONFLICT_FREE_OFFSET(ai)];
     }
-    pos = histScan[blockIdx.x + getBin(localSrc[bi], bit, nBins) * gridSize] + localScan[bi] - 1;
+    pos = histScan[blockIdx.x + getBin(localSrc[CONFLICT_FREE_OFFSET(bi)], bit, nBins) * gridSize] + localScan[CONFLICT_FREE_OFFSET(bi)] - 1;
     if (pos < n) {
-        dst[pos] = localSrc[bi];
+        dst[pos] = localSrc[CONFLICT_FREE_OFFSET(bi)];
     }
+    // pos = histScan[blockIdx.x + getBin(localSrc[bi], bit, nBins) * gridSize] + localScan[bi] - 1;
+    // if (pos < n) {
+    //     dst[pos] = localSrc[bi];
+    // }
 }
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
@@ -212,7 +219,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
             (d_hist, histSize, d_histScan);
         
         // scatter
-        scatterKernel<<<gridSizeScatter, blockSizeScatter, (4 * blockSizeScatter.x) * sizeof(uint32_t)>>>
+        scatterKernel<<<gridSizeScatter, blockSizeScatter, (6 * blockSizeScatter.x) * sizeof(uint32_t)>>>
             (d_src, n, d_histScan, k, nBins, d_dst, bit, gridSizeHist.x);
         
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
