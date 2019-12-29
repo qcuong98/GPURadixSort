@@ -11,9 +11,11 @@ __global__ void computeHistKernel(uint32_t * in, int n, uint32_t * hist, int nBi
     __syncthreads();
 
     // Each block computes its local hist using atomic on SMEM
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    int i = 2 * blockDim.x * blockIdx.x + 2 * threadIdx.x;
     if (i < n)
         atomicAdd(&s_hist[getBin(in[i], bit, nBins)], 1);
+    if (i + 1 < n)
+        atomicAdd(&s_hist[getBin(in[i + 1], bit, nBins)], 1);
     __syncthreads();
 
     // Each block adds its local hist to global hist using atomic on GMEM
@@ -135,8 +137,10 @@ __device__ void countEqualBefore(uint32_t* src, uint32_t* buffer, int bit, int n
     for (int stride = 1, d = blockDim.x; stride <= blockDim.x; stride <<= 1, d >>= 1) {
         int cur = 2 * stride * (threadIdx.x + 1) - 1;
         int prev = cur - stride;
-        if (threadIdx.x < d && getBin(src[CONFLICT_FREE_OFFSET(cur)], bit, nBins) == getBin(src[CONFLICT_FREE_OFFSET(prev)], bit, nBins)) {
-            buffer[CONFLICT_FREE_OFFSET(cur)] += buffer[CONFLICT_FREE_OFFSET(prev)];
+        cur = CONFLICT_FREE_OFFSET(cur);
+        prev = CONFLICT_FREE_OFFSET(prev);
+        if (threadIdx.x < d && getBin(src[cur], bit, nBins) == getBin(src[prev], bit, nBins)) {
+            buffer[cur] += buffer[prev];
         }
         __syncthreads();
     }
@@ -144,8 +148,10 @@ __device__ void countEqualBefore(uint32_t* src, uint32_t* buffer, int bit, int n
     for (int stride = blockDim.x >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
         int cur = 2 * stride * (threadIdx.x + 1) + stride - 1;
         int prev = cur - stride;
-        if (threadIdx.x < d - 1 && getBin(src[CONFLICT_FREE_OFFSET(cur)], bit, nBins) == getBin(src[CONFLICT_FREE_OFFSET(prev)], bit, nBins)) {
-            buffer[CONFLICT_FREE_OFFSET(cur)] += buffer[CONFLICT_FREE_OFFSET(prev)];
+        cur = CONFLICT_FREE_OFFSET(cur);
+        prev = CONFLICT_FREE_OFFSET(prev);
+        if (threadIdx.x < d - 1 && getBin(src[cur], bit, nBins) == getBin(src[prev], bit, nBins)) {
+            buffer[cur] += buffer[prev];
         }
         __syncthreads();
     }
@@ -198,7 +204,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
 
     // Compute block and grid size for scan and scatter phase
     dim3 blockSizeHist(blockSizes[0]);
-    dim3 gridSizeHist((n - 1) / blockSizeHist.x + 1);
+    dim3 gridSizeHist((n - 1) / (2 * blockSizeHist.x) + 1);
     dim3 blockSizeScan(blockSizes[1]);
     dim3 gridSizeScan((n - 1) / blockSizeScan.x + 1);
     dim3 blockSizeScatter(blockSizes[2]);
