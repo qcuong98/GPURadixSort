@@ -1,12 +1,11 @@
 #include "main.h"
 
-#define NUM_BANKS 32
 #define LOG_NUM_BANKS 5
-#define CONFLICT_FREE_OFFSET(n) \
-        ((n) >> NUM_BANKS + (n) >> (2 * LOG_NUM_BANKS)) 
+#define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
         
 __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * blkSums, int bit) {   
     extern __shared__ uint32_t s_in[];
+
     int id_ai = 2 * blockDim.x * blockIdx.x + threadIdx.x;
     int id_bi = 2 * blockDim.x * blockIdx.x + threadIdx.x + blockDim.x;
     int ai = threadIdx.x;
@@ -18,18 +17,20 @@ __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * b
     __syncthreads();
 
     // reduction phase
-    for (int stride = 1; stride <= blockDim.x; stride <<= 1) {
-        if (threadIdx.x < blockDim.x / stride) {
-            int pos = 2 * stride * (threadIdx.x + 1) - 1;
-            s_in[pos + CONFLICT_FREE_OFFSET(pos)] += s_in[pos - stride + CONFLICT_FREE_OFFSET(pos - stride)];
+    for (int stride = 1, d = blockDim.x; stride <= blockDim.x; stride <<= 1, d >>= 1) {
+        if (threadIdx.x < d) {
+            int cur = 2 * stride * (threadIdx.x + 1) - 1;
+            int prev = cur - stride;
+            s_in[cur + CONFLICT_FREE_OFFSET(cur)] += s_in[prev + CONFLICT_FREE_OFFSET(prev)];
         }
         __syncthreads();
     }
     // post-reduction phase
-    for (int stride = blockDim.x >> 1; stride >= 1; stride >>= 1) {
-        if (threadIdx.x < blockDim.x / stride - 1) {
-            int pos = 2 * stride * (threadIdx.x + 1) + stride - 1;
-            s_in[pos + CONFLICT_FREE_OFFSET(pos)] += s_in[pos - stride + CONFLICT_FREE_OFFSET(pos - stride)];
+    for (int stride = blockDim.x >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
+        if (threadIdx.x < d - 1) {
+            int cur = 2 * stride * (threadIdx.x + 1) + stride - 1;
+            int prev = cur - stride;
+            s_in[cur + CONFLICT_FREE_OFFSET(cur)] += s_in[prev + CONFLICT_FREE_OFFSET(prev)];
         }
         __syncthreads();
     }
@@ -66,7 +67,7 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, int 
     uint32_t * d_sum_blkSums;
     CHECK(cudaMalloc(&d_sum_blkSums, gridSize.x * sizeof(uint32_t)));
 
-    scanBlkKernel<<<gridSize, blkSize, 2 * blkSize.x * sizeof(uint32_t)>>>
+    scanBlkKernel<<<gridSize, blkSize, 3 * blkSize.x * sizeof(uint32_t)>>>
         (d_in, n, d_out, d_blkSums, bit);
     if (gridSize.x != 1) {
         computeScanArray(d_blkSums, d_sum_blkSums, gridSize.x, blkSize, -1);
