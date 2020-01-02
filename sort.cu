@@ -147,7 +147,7 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, i
     }
 }
 
-void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
+void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     int nBins = 1 << k;
     uint32_t * d_src;
     uint32_t * d_dst;
@@ -158,30 +158,26 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
     CHECK(cudaMalloc(&d_dst, n * sizeof(uint32_t)));
 
     // Compute block and grid size for scan and scatter phase
-    dim3 blockSizeHist(blockSizes[0]);
-    dim3 gridSizeHist((n - 1) / blockSizeHist.x + 1);
-    dim3 blockSizeScan(blockSizes[1]);
-    dim3 gridSizeScan((n - 1) / blockSizeScan.x + 1);
-    dim3 blockSizeScatter(blockSizes[2]);
-    dim3 gridSizeScatter((n - 1) / blockSizeScatter.x + 1);
+    dim3 blockSize(blkSize);
+    dim3 gridSize((n - 1) / blockSize.x + 1);
 
-    int histSize = nBins * gridSizeHist.x;
+    int histSize = nBins * gridSize.x;
     CHECK(cudaMalloc(&d_hist, histSize * sizeof(uint32_t)));
     CHECK(cudaMalloc(&d_histScan, histSize * sizeof(uint32_t)));
 
     for (int bit = 0; bit < sizeof(uint32_t) * 8; bit += k) {
         // compute hist
-        computeHistKernel<<<gridSizeHist, blockSizeHist, nBins * sizeof(uint32_t)>>>
-            (d_src, n, d_hist, nBins, bit, gridSizeHist.x);
+        computeHistKernel<<<gridSize, blockSize, nBins * sizeof(uint32_t)>>>
+            (d_src, n, d_hist, nBins, bit, gridSize.x);
         
         // compute hist scan
-        computeScanArray(d_hist, d_histScan, histSize, blockSizeScan);
-        reduceKernel<<<gridSizeScan, blockSizeScan>>>
+        computeScanArray(d_hist, d_histScan, histSize, blockSize);
+        reduceKernel<<<gridSize, blockSize>>>
             (d_hist, histSize, d_histScan);
         
         // scatter
-        scatterKernel<<<gridSizeScatter, blockSizeScatter, (3 * blockSizeScatter.x) * sizeof(uint32_t)>>>
-            (d_src, n, d_histScan, k, nBins, d_dst, bit, gridSizeHist.x);
+        scatterKernel<<<gridSize, blockSize, (3 * blockSize.x) * sizeof(uint32_t)>>>
+            (d_src, n, d_histScan, k, nBins, d_dst, bit, gridSize.x);
         
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
     }

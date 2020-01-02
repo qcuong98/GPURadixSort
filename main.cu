@@ -25,12 +25,8 @@ int main(int argc, char ** argv) {
     // printArray(in, n);
 
     // DETERMINE BLOCK SIZES
-    int blockSizes[3]; // One for histogram, one for scan, one for scatter
-    blockSizes[0] = atoi(argv[2]);
-    blockSizes[1] = atoi(argv[3]);
-    blockSizes[2] = atoi(argv[4]);
-    printf("\nHist block size: %d, scan block size %d, scatter block size: %d\n", 
-                                blockSizes[0], blockSizes[1], blockSizes[2]);
+    int blockSize = atoi(argv[2]);
+    printf("\nBlock size for all kernels: %d\n", blockSize);
 
     // SORT BY THRUST
     GpuTimer thrust_timer;
@@ -43,14 +39,14 @@ int main(int argc, char ** argv) {
     // SORT BY OUR IMPLEMENTATION
     GpuTimer our_timer;
     our_timer.Start();
-    sort(in, n, out, k, blockSizes);
+    sort(in, n, out, k, blockSize);
     our_timer.Stop();
     printf("Our Time: %.3f ms\n", our_timer.Elapsed());
     // printArray(out, n);
 
     checkCorrectness(out, thrustOut, n);
 
-    // FREE MEMORIES 
+    // FREE MEMORIES
     free(in);
     free(out);
     free(thrustOut);
