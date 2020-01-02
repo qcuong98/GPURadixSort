@@ -160,12 +160,12 @@ __device__ void countEqualBefore(uint32_t* src, uint32_t* buffer, int bit, int n
 __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, int nBins, uint32_t* dst, int bit, int gridSize) {
     extern __shared__ uint32_t s[];
     uint32_t* localSrc = s;
-    uint32_t* localScan = localSrc + 3 * blockDim.x;
+    uint32_t* localScan = localSrc + CONFLICT_FREE_OFFSET(2 * blockDim.x);
 
-    int id_ai = 2 * blockDim.x * blockIdx.x + 2 * threadIdx.x;
-    int id_bi = 2 * blockDim.x * blockIdx.x + 2 * threadIdx.x + 1;
-    int ai = 2 * threadIdx.x;
-    int bi = 2 * threadIdx.x + 1;
+    int id_ai = 2 * blockDim.x * blockIdx.x + threadIdx.x;
+    int id_bi = 2 * blockDim.x * blockIdx.x + threadIdx.x + blockDim.x;
+    int ai = threadIdx.x;
+    int bi = threadIdx.x + blockDim.x;
     localSrc[CONFLICT_FREE_OFFSET(ai)] = id_ai < n ? src[id_ai] : UINT_MAX;
     localSrc[CONFLICT_FREE_OFFSET(bi)] = id_bi < n ? src[id_bi] : UINT_MAX;
     __syncthreads();
@@ -186,10 +186,6 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* histScan, int k, i
     if (pos < n) {
         dst[pos] = localSrc[CONFLICT_FREE_OFFSET(bi)];
     }
-    // pos = histScan[blockIdx.x + getBin(localSrc[bi], bit, nBins) * gridSize] + localScan[bi] - 1;
-    // if (pos < n) {
-    //     dst[pos] = localSrc[bi];
-    // }
 }
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
@@ -225,7 +221,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int * blockSizes) {
             (d_hist, histSize, d_histScan);
         
         // scatter
-        scatterKernel<<<gridSizeScatter, blockSizeScatter, (6 * blockSizeScatter.x) * sizeof(uint32_t)>>>
+        scatterKernel<<<gridSizeScatter, blockSizeScatter, CONFLICT_FREE_OFFSET(4 * blockSizeScatter.x) * sizeof(uint32_t)>>>
             (d_src, n, d_histScan, k, nBins, d_dst, bit, gridSizeHist.x);
         
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
