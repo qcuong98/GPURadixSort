@@ -1,9 +1,15 @@
 #include "main.h"
 
+#define CTA_SIZE 4
+
 __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * blkSums, int bit) {   
     extern __shared__ uint32_t s_in[];
-    int id_in = blockDim.x * blockIdx.x + threadIdx.x;
-    s_in[threadIdx.x] = id_in < n ? (bit < 0 ? in[id_in] : ((in[id_in] >> bit) & 1)) : 0;
+
+    int id_in = CTA_SIZE * (blockDim.x * blockIdx.x + threadIdx.x);
+    uint32_t val = 0;
+    for (int i = 0; i < CTA_SIZE; ++i)
+        val += (id_in + i < n ? (bit < 0 ? in[id_in + i] : ((in[id_in + i] >> bit) & 1)) : 0);
+    s_in[threadIdx.x] = val;
     __syncthreads();
 
     int turn = 0;
@@ -20,20 +26,24 @@ __global__ void scanBlkKernel(uint32_t * in, int n, uint32_t * out, uint32_t * b
         blkSums[blockIdx.x] = s_in[threadIdx.x + turn * blockDim.x];
     }
 
-    if (id_in < n) {
-        out[id_in] = s_in[threadIdx.x + turn * blockDim.x];
-    }
+    val = s_in[threadIdx.x + turn * blockDim.x];
+    for (int i = CTA_SIZE - 1; i >= 0; --i)
+        if (id_in + i < n) {
+            out[id_in + i] = val;
+            val -= (id_in + i < n ? (bit < 0 ? in[id_in + i] : ((in[id_in + i] >> bit) & 1)) : 0);
+        }
 }
 
 __global__ void sumPrefixBlkKernel(uint32_t * out, int n, uint32_t * blkSums) {
-    int id_in = blockDim.x * blockIdx.x + threadIdx.x;
-    if (id_in < n && blockIdx.x > 0) {
-        out[id_in] += blkSums[blockIdx.x - 1];
-    }
+    int id_in = CTA_SIZE * (blockDim.x * blockIdx.x + threadIdx.x);
+    for (int i = 0; i < CTA_SIZE; ++i)
+        if (id_in + i < n && blockIdx.x > 0) {
+            out[id_in + i] += blkSums[blockIdx.x - 1];
+        }
 }
 
 void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, int bit) {
-    dim3 gridSize((n - 1) / blkSize.x + 1);
+    dim3 gridSize((n - 1) / (CTA_SIZE * blkSize.x) + 1);
 
     uint32_t * d_blkSums;
     CHECK(cudaMalloc(&d_blkSums, gridSize.x * sizeof(uint32_t)));
