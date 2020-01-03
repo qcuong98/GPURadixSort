@@ -13,7 +13,6 @@ int main(int argc, char ** argv) {
     size_t bytes = n * sizeof(uint32_t);
     uint32_t * in = (uint32_t *)malloc(bytes);
     uint32_t * out = (uint32_t *)malloc(bytes); // Our result
-    uint32_t * thrustOut = (uint32_t *)malloc(bytes); // Thrust's result
 
     // SET UP INPUT DATA
     for (int i = 0; i < n; i++)
@@ -21,18 +20,12 @@ int main(int argc, char ** argv) {
     // printArray(in, n);
 
     // DETERMINE BLOCK SIZES
-    int blockSizes[3]; // One for histogram, one for scan, one for scatter
-    blockSizes[0] = atoi(argv[2]);
-    blockSizes[1] = atoi(argv[3]);
-    blockSizes[2] = atoi(argv[4]);
-    printf("\nHist block size: %d, scan block size %d, scatter block size: %d\n", 
-                                blockSizes[0], blockSizes[1], blockSizes[2]);
-    
-    // SORT BY OUR IMPLEMENTATION
-    sort(in, n, out, k, blockSizes);
-    // printArray(out, n);
+    int blockSize = atoi(argv[2]);
+    printf("\nBlock size for all kernels: %d\n", blockSize);
 
-    // FREE MEMORIES 
+    sort(in, n, out, k, blockSize);
+
+    // FREE MEMORIES
     free(in);
     free(out);
     
