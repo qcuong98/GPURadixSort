@@ -1,7 +1,7 @@
 CC = nvcc
 PROF = nvprof
-K = 4
-BLKSIZE = 256
+K = 8
+BLKSIZE = 1024
 
 all: build run clean
 build:

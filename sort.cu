@@ -195,7 +195,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
             (d_hist, histSize, d_histScan);
         
         // scatter
-        sortLocalKernel<<<gridSize, blockSizeCTA, (CTA_SIZE + 2) * blockSize.x * sizeof(uint32_t)>>>
+        sortLocalKernel<<<gridSize, blockSizeCTA, (CTA_SIZE + 2) * blockSizeCTA.x * sizeof(uint32_t)>>>
             (d_src, n, d_dst, bit, k);
         scatterKernel<<<gridSize, blockSize, 3 * blockSize.x * sizeof(uint32_t)>>>
             (d_src, n, d_dst, d_histScan, bit, nBins, gridSize.x);
