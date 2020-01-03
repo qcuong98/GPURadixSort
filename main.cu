@@ -33,7 +33,7 @@ int main(int argc, char ** argv) {
     thrust_timer.Start();
     sortByThrust(in, n, thrustOut);
     thrust_timer.Stop();
-    printf("Thrust's Time: %.3f ms\n", thrust_timer.Elapsed());
+    printf("\nThrust's Time: %.3f ms\n", thrust_timer.Elapsed());
     // printArray(thrustOut, n);
     
     // SORT BY OUR IMPLEMENTATION
