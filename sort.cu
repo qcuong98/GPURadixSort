@@ -3,7 +3,7 @@
 #define CTA_SIZE 4
 
 #define LOG_NUM_BANKS 5
-#define CONFLICT_FREE_OFFSET(n) ((n) + ((n) >> LOG_NUM_BANKS))
+#define CONFLICT_FREE_OFFSET(n) (n) + ((n) >> LOG_NUM_BANKS))
 
 __device__ uint32_t getBin(uint32_t val, uint32_t bit, uint32_t nBins) {
     return (val >> bit) & (nBins - 1);
@@ -151,8 +151,8 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int k) {
     for (int i = 0; i < CTA_SIZE; ++i)
         localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)] = (id_bi + i < n ? src[id_bi + i] : UINT_MAX);
 
+    uint32_t tempA[CTA_SIZE], tempB[CTA_SIZE];
     for (int blockBit = bit; blockBit < bit + k; ++blockBit) {
-        uint32_t tempA[CTA_SIZE], tempB[CTA_SIZE];
         uint32_t valA = 0, valB = 0;
         for (int i = 0; i < CTA_SIZE; ++i) {
             tempA[i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)]; 
@@ -212,10 +212,10 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int k) {
 
     for (int i = 0; i < CTA_SIZE; ++i)
         if (id_ai + i < n)
-            src[id_ai + i] = localSrc[CTA_SIZE * ai + i];
+            src[id_ai + i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)];
     for (int i = 0; i < CTA_SIZE; ++i)
         if (id_bi + i < n)
-            src[id_bi + i] = localSrc[CTA_SIZE * bi + i];
+            src[id_bi + i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)];
 }
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
