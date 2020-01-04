@@ -3,7 +3,7 @@
 #define CTA_SIZE 4
 
 #define LOG_NUM_BANKS 5
-#define CONFLICT_FREE_OFFSET(n) (n) + ((n) >> LOG_NUM_BANKS))
+#define CONFLICT_FREE_OFFSET(n) ((n) + ((n) >> LOG_NUM_BANKS))
 
 __device__ uint32_t getBin(uint32_t val, uint32_t bit, uint32_t nBins) {
     return (val >> bit) & (nBins - 1);
