@@ -203,14 +203,10 @@ __global__ void scatterKernel2(uint32_t* src, int n, uint32_t* dst, uint32_t* hi
     uint32_t lastScanA = localScan[CONFLICT_FREE_OFFSET(ai - 1)];
     uint32_t lastScanB = localScan[CONFLICT_FREE_OFFSET(bi - 1)];
     for (int i = CTA_SIZE - 2; i >= 0; --i) {
-        if (tempA[i] == tempA[i + 1])
-            countA[i] = countA[i + 1] - 1;
-        else if (threadIdx.x && tempA[i] == lastBinA)
+        if (threadIdx.x && tempA[i] == lastBinA)
             countA[i] += lastScanA;
         
-        if (tempB[i] == tempB[i + 1])
-            countB[i] = countB[i + 1] - 1;
-        else if (tempB[i] == lastBinB)
+        if (tempB[i] == lastBinB)
             countB[i] += lastScanB;
     }
     
@@ -343,8 +339,8 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
         // scatter
         sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 2) * blockSizeCTA2.x) * sizeof(uint32_t)>>>
             (d_src, n, bit, k);
-        scatterKernel2<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 4) * blockSizeCTA2.x) * sizeof(uint32_t)>>>
-//         scatterKernel<<<gridSize, blockSize2, CONFLICT_FREE_OFFSET(4 * blockSize2.x) * sizeof(uint32_t)>>>
+//         scatterKernel2<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 4) * blockSizeCTA2.x) * sizeof(uint32_t)>>>
+        scatterKernel<<<gridSize, blockSize2, CONFLICT_FREE_OFFSET(4 * blockSize2.x) * sizeof(uint32_t)>>>
             (d_src, n, d_dst, d_histScan, bit, nBins, gridSize.x);
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
     }
