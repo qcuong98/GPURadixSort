@@ -339,8 +339,8 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
         // scatter
         sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 2) * blockSizeCTA2.x) * sizeof(uint32_t)>>>
             (d_src, n, bit, k);
-//         scatterKernel2<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 4) * blockSizeCTA2.x) * sizeof(uint32_t)>>>
-        scatterKernel<<<gridSize, blockSize2, CONFLICT_FREE_OFFSET(4 * blockSize2.x) * sizeof(uint32_t)>>>
+        scatterKernel2<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 4) * blockSizeCTA2.x) * sizeof(uint32_t)>>>
+//         scatterKernel<<<gridSize, blockSize2, CONFLICT_FREE_OFFSET(4 * blockSize2.x) * sizeof(uint32_t)>>>
             (d_src, n, d_dst, d_histScan, bit, nBins, gridSize.x);
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
     }
