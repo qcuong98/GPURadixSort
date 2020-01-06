@@ -153,6 +153,7 @@ __global__ void scatterKernel2(uint32_t* src, int n, uint32_t* dst, uint32_t* hi
     __syncthreads();
     
     uint32_t tempA[CTA_SIZE], tempB[CTA_SIZE], countA[CTA_SIZE], countB[CTA_SIZE];
+    #pragma unroll
     for (int i = 0; i < CTA_SIZE; ++i) {
         tempA[i] = getBin(localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)], bit, nBins); 
         tempB[i] = getBin(localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)], bit, nBins); 
@@ -202,6 +203,8 @@ __global__ void scatterKernel2(uint32_t* src, int n, uint32_t* dst, uint32_t* hi
     uint32_t lastBinB = localBin[CONFLICT_FREE_OFFSET(bi - 1)];
     uint32_t lastScanA = localScan[CONFLICT_FREE_OFFSET(ai - 1)];
     uint32_t lastScanB = localScan[CONFLICT_FREE_OFFSET(bi - 1)];
+    
+    #pragma unroll
     for (int i = CTA_SIZE - 2; i >= 0; --i) {
         if (threadIdx.x && tempA[i] == lastBinA)
             countA[i] += lastScanA;
@@ -211,6 +214,7 @@ __global__ void scatterKernel2(uint32_t* src, int n, uint32_t* dst, uint32_t* hi
     }
     
     uint32_t pos;
+    #pragma unroll
     for (int i = 0; i < CTA_SIZE; ++i) {
         pos = histScan[blockIdx.x + tempA[i] * gridSize] + countA[i] - 1;
         if (pos < n)
@@ -227,8 +231,6 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int k) {
     uint32_t* localSrc = s;
     uint32_t* localScan = localSrc + CONFLICT_FREE_OFFSET(2 * CTA_SIZE * blockDim.x);
 
-    int id_ai = CTA_SIZE * (2 * blockDim.x * blockIdx.x + threadIdx.x);
-    int id_bi = CTA_SIZE * (2 * blockDim.x * blockIdx.x + threadIdx.x + blockDim.x);
     int ai = threadIdx.x;
     int bi = threadIdx.x + blockDim.x;
     
@@ -297,12 +299,18 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int k) {
         __syncthreads();
     }
 
-    for (int i = 0; i < CTA_SIZE; ++i)
-        if (id_ai + i < n)
-            src[id_ai + i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)];
-    for (int i = 0; i < CTA_SIZE; ++i)
-        if (id_bi + i < n)
-            src[id_bi + i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)];
+//     for (int i = 0; i < CTA_SIZE; ++i)
+//         if (id_ai + i < n)
+//             src[id_ai + i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)];
+//     for (int i = 0; i < CTA_SIZE; ++i)
+//         if (id_bi + i < n)
+//             src[id_bi + i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)];
+
+    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
+        int pos = (2 * CTA_SIZE * blockDim.x) * blockIdx.x + i;
+        if (pos < n)
+            src[pos] = localSrc[CONFLICT_FREE_OFFSET(i)];
+    }
 }
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
