@@ -143,15 +143,15 @@ __global__ void scatterKernel2(uint32_t* src, int n, uint32_t* dst, uint32_t* hi
     uint32_t* localScan = localSrc + CONFLICT_FREE_OFFSET(2 * CTA_SIZE * blockDim.x);
     uint32_t* localBin = localScan + CONFLICT_FREE_OFFSET(2 * blockDim.x);
 
-    int id_ai = CTA_SIZE * (2 * blockDim.x * blockIdx.x + threadIdx.x);
-    int id_bi = CTA_SIZE * (2 * blockDim.x * blockIdx.x + threadIdx.x + blockDim.x);
     int ai = threadIdx.x;
     int bi = threadIdx.x + blockDim.x;
-    for (int i = 0; i < CTA_SIZE; ++i)
-        localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)] = (id_ai + i < n ? src[id_ai + i] : UINT_MAX);
-    for (int i = 0; i < CTA_SIZE; ++i)
-        localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)] = (id_bi + i < n ? src[id_bi + i] : UINT_MAX);
 
+    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
+        int pos = (2 * CTA_SIZE * blockDim.x) * blockIdx.x + i;
+        localSrc[CONFLICT_FREE_OFFSET(i)] = pos < n ? src[pos] : UINT_MAX;
+    }
+    __syncthreads();
+    
     uint32_t tempA[CTA_SIZE], tempB[CTA_SIZE], countA[CTA_SIZE], countB[CTA_SIZE];
     for (int i = 0; i < CTA_SIZE; ++i) {
         tempA[i] = getBin(localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)], bit, nBins); 
@@ -232,10 +232,11 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int k) {
     int ai = threadIdx.x;
     int bi = threadIdx.x + blockDim.x;
     
-    for (int i = 0; i < CTA_SIZE; ++i)
-        localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)] = (id_ai + i < n ? src[id_ai + i] : UINT_MAX);
-    for (int i = 0; i < CTA_SIZE; ++i)
-        localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)] = (id_bi + i < n ? src[id_bi + i] : UINT_MAX);
+    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
+        int pos = (2 * CTA_SIZE * blockDim.x) * blockIdx.x + i;
+        localSrc[CONFLICT_FREE_OFFSET(i)] = pos < n ? src[pos] : UINT_MAX;
+    }
+    __syncthreads();
 
     uint32_t tempA[CTA_SIZE], tempB[CTA_SIZE];
     for (int blockBit = bit; blockBit < bit + k; ++blockBit) {
