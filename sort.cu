@@ -142,6 +142,7 @@ __global__ void scatterKernel2(uint32_t* src, int n, uint32_t* dst, uint32_t* hi
     uint32_t* localSrc = s;
     uint32_t* localScan = localSrc + CONFLICT_FREE_OFFSET(2 * CTA_SIZE * blockDim.x);
     uint32_t* localBin = localScan + CONFLICT_FREE_OFFSET(2 * blockDim.x);
+    uint32_t* start = localBin + CONFLICT_FREE_OFFSET(2 * blockDim.x);
 
     int ai = threadIdx.x;
     int bi = threadIdx.x + blockDim.x;
@@ -151,6 +152,9 @@ __global__ void scatterKernel2(uint32_t* src, int n, uint32_t* dst, uint32_t* hi
         localSrc[CONFLICT_FREE_OFFSET(i)] = pos < n ? src[pos] : UINT_MAX;
     }
     __syncthreads();
+    for (int i = threadIdx.x; i < nBins; i += blockDim.x) {
+        start[CONFLICT_FREE_OFFSET(i)] = histScan[blockIdx.x * nBins + i];
+    }
     
     uint32_t tempA[CTA_SIZE], tempB[CTA_SIZE], countA[CTA_SIZE], countB[CTA_SIZE];
     #pragma unroll
@@ -216,11 +220,11 @@ __global__ void scatterKernel2(uint32_t* src, int n, uint32_t* dst, uint32_t* hi
     uint32_t pos;
     #pragma unroll
     for (int i = 0; i < CTA_SIZE; ++i) {
-        pos = histScan[blockIdx.x + tempA[i] * gridSize] + countA[i] - 1;
+        pos = start[CONFLICT_FREE_OFFSET(tempA[i])] + countA[i] - 1;
         if (pos < n)
             dst[pos] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)];
         
-        pos = histScan[blockIdx.x + tempB[i] * gridSize] + countB[i] - 1;
+        pos = start[CONFLICT_FREE_OFFSET(tempB[i])] + countB[i] - 1;
         if (pos < n)
             dst[pos] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)];
     }
@@ -298,19 +302,26 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int k) {
         
         __syncthreads();
     }
-
-//     for (int i = 0; i < CTA_SIZE; ++i)
-//         if (id_ai + i < n)
-//             src[id_ai + i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)];
-//     for (int i = 0; i < CTA_SIZE; ++i)
-//         if (id_bi + i < n)
-//             src[id_bi + i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)];
-
+    
     for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
         int pos = (2 * CTA_SIZE * blockDim.x) * blockIdx.x + i;
         if (pos < n)
             src[pos] = localSrc[CONFLICT_FREE_OFFSET(i)];
     }
+}
+
+__global__ void transpose(uint32_t *iMatrix, uint32_t *oMatrix, int rows, int cols)
+{
+    __shared__ int s_blkData[32][33];
+    int iR = blockIdx.x * blockDim.x + threadIdx.y;
+    int iC = blockIdx.y * blockDim.y + threadIdx.x;
+    s_blkData[threadIdx.y][threadIdx.x] = (iR < rows && iC < cols) ? iMatrix[iR * cols + iC] : 0;
+    __syncthreads();
+    // Each block write data efficiently from SMEM to GMEM
+    int oR = blockIdx.y * blockDim.y + threadIdx.y;
+    int oC = blockIdx.x * blockDim.x + threadIdx.x;
+    if (oR < cols && oC < rows)
+        oMatrix[oR * rows + oC] = s_blkData[threadIdx.x][threadIdx.y];
 }
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
@@ -329,10 +340,12 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     dim3 blockSizeCTA(blkSize / CTA_SIZE);
     dim3 blockSizeCTA2(blkSize / CTA_SIZE / 2);
     dim3 gridSize((n - 1) / blockSize.x + 1);
-
+    dim3 blockSizeTranspose(32, 32);
+    dim3 gridSizeTransposeHistScan((nBins - 1) / blockSizeTranspose.x + 1, (gridSize.x - 1) / blockSizeTranspose.x + 1);
+    
     int histSize = nBins * gridSize.x;
     CHECK(cudaMalloc(&d_hist, histSize * sizeof(uint32_t)));
-    CHECK(cudaMalloc(&d_histScan, histSize * sizeof(uint32_t)));
+    CHECK(cudaMalloc(&d_histScan, 2 * histSize * sizeof(uint32_t)));
     dim3 gridSizeScan((histSize - 1) / blockSize.x + 1);
 
     for (int bit = 0; bit < sizeof(uint32_t) * 8; bit += k) {
@@ -341,14 +354,17 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
             (d_src, n, d_hist, nBins, bit, gridSize.x);
         
         // compute hist scan
-        computeScanArray(d_hist, d_histScan, histSize, blockSize);
+        computeScanArray(d_hist, d_histScan + histSize, histSize, blockSize);
         reduceKernel<<<gridSizeScan, blockSize>>>
-            (d_hist, histSize, d_histScan);
+            (d_hist, histSize, d_histScan + histSize);
+        
+        transpose<<<gridSizeTransposeHistScan, blockSizeTranspose>>>
+          (d_histScan + histSize, d_histScan, nBins, gridSize.x);
         
         // scatter
         sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 2) * blockSizeCTA2.x) * sizeof(uint32_t)>>>
             (d_src, n, bit, k);
-        scatterKernel2<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 4) * blockSizeCTA2.x) * sizeof(uint32_t)>>>
+        scatterKernel2<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 4) * blockSizeCTA2.x + nBins) * sizeof(uint32_t)>>>
 //         scatterKernel<<<gridSize, blockSize2, CONFLICT_FREE_OFFSET(4 * blockSize2.x) * sizeof(uint32_t)>>>
             (d_src, n, d_dst, d_histScan, bit, nBins, gridSize.x);
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
