@@ -5,6 +5,9 @@
 #define LOG_NUM_BANKS 5
 #define CONFLICT_FREE_OFFSET(n) ((n) + ((n) >> LOG_NUM_BANKS))
 
+#define BLOCKDIM_SCAN 128
+#define BLOCKDIM_SORTLOCAL 128
+
 __device__ uint32_t getBin(uint32_t val, uint32_t bit, uint32_t nBins) {
     return (val >> bit) & (nBins - 1);
 }
@@ -62,7 +65,6 @@ __global__ void scanBlkKernel(uint32_t * src, int n, uint32_t * out, uint32_t * 
     localScanCTA[CONFLICT_FREE_OFFSET(bi)] = tempB[CTA_SIZE - 1];
     __syncthreads();
 
-#define BLOCKDIM_SCAN 128
     // reduction phase
     # pragma unroll
     for (int stride = 1, d = BLOCKDIM_SCAN; stride <= BLOCKDIM_SCAN; stride <<= 1, d >>= 1) {
@@ -191,7 +193,6 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
         localScan[CONFLICT_FREE_OFFSET(bi)] = valB;
         __syncthreads();
 
-#define BLOCKDIM_SORTLOCAL 128
         // reduction phase
         # pragma unroll
         for (int stride = 1, d = BLOCKDIM_SORTLOCAL; stride <= BLOCKDIM_SORTLOCAL; stride <<= 1, d >>= 1) {
@@ -346,45 +347,6 @@ __global__ void transpose(uint32_t *iMatrix, uint32_t *oMatrix, int rows, int co
         oMatrix[oR * rows + oC] = s_blkData[threadIdx.x][threadIdx.y];
 }
 
-void checkSortLocal(uint32_t* d_src, int n, int bit, int nBins, int k, uint32_t* d_count, int blockDim) {
-    uint32_t* src = (uint32_t*)malloc(n * sizeof(uint32_t));
-    uint32_t* count = (uint32_t*)malloc(n * sizeof(uint32_t));
-    CHECK(cudaMemcpy(src, d_src, n * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    CHECK(cudaMemcpy(count, d_count, n * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    for (int i = 0; i < n; ++i) {
-        src[i] = src[i] >> bit & (nBins - 1);
-    }
-    for (int i = 1; i < n; ++i) {
-        if (i % blockDim != 0 && src[i] < src[i - 1]) {
-            printf("sort wrong\n");
-            exit(0);
-        }
-
-        if (i % blockDim == 0 && count[i] != 1) {
-            printf("count wrong\n");
-            exit(0);
-        }
-        if (i % blockDim != 0) {
-            if (count[i] != 1 + count[i - 1] * (src[i] == src[i - 1])) {
-                printf("count wrong\n");
-            exit(0);
-            }
-        }
-//         printf("ok\n");
-    }
-}
-
-void printArr(const char* tag, uint32_t* d_arr, int n) {
-    uint32_t* arr = (uint32_t*)malloc(n * sizeof(uint32_t));
-    CHECK(cudaMemcpy(arr, d_arr, n * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    printf(tag);
-    printf("\n");
-    for (int i = 0; i < n; ++i) {
-        printf("%d ", arr[i]);
-    }
-    printf("\n");
-    free(arr);
-}
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     int nBins = 1 << k;
@@ -414,9 +376,6 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     dim3 gridSizeScan((histSize - 1) / blockSize.x + 1);
 
     for (int bit = 0; bit < sizeof(uint32_t) * 8; bit += k) {
-//         printf("bit = %d\n", bit);
-//         printArr("src before", d_src, n);
-        // sort locally
         sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSizeCTA2.x + nBins) * sizeof(uint32_t)>>>
             (d_src, n, bit, nBins, k, d_count, d_hist + histSize);
 //         printArr("src after", d_src, n);
@@ -424,24 +383,17 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
         
         transpose<<<gridSizeTransposeHist, blockSizeTranspose>>>
           (d_hist + histSize, d_hist, gridSize.x, nBins);
-//         printArr("hist", d_hist, histSize);
         
         // compute hist scan
         computeScanArray(d_hist, d_histScan + histSize, histSize, blockSize, blockSizeCTA2);
         reduceKernel<<<gridSizeScan, blockSize>>>
             (d_hist, histSize, d_histScan + histSize);
         
-//         printArr("histScan", d_histScan + histSize, histSize);
-        // transpose histScan to read gmem efficiently
+        // scatter
         transpose<<<gridSizeTransposeHistScan, blockSizeTranspose>>>
           (d_histScan + histSize, d_histScan, nBins, gridSize.x);
-        
-//         printArr("histScan transposed", d_histScan, histSize);
-        // scatter
         scatterKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET(nBins) * sizeof(uint32_t)>>>
             (d_src, n, d_dst, d_histScan, bit, nBins, d_count);
-//         printArr("dst", d_dst, n);
-//         printf("--------------\n");
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
     }
 
