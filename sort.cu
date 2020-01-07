@@ -142,21 +142,11 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 blkSize, dim3
 }
 
 __global__ void scatterKernel(uint32_t* src, int n, uint32_t* dst, uint32_t* histScan, int bit, int nBins, uint32_t* count) {
-    extern __shared__ uint32_t start[];
-    uint32_t first = 2 * CTA_SIZE * blockDim.x * blockIdx.x;
-    for (int i = threadIdx.x; i < nBins; i += blockDim.x) {
-        start[CONFLICT_FREE_OFFSET(i)] = histScan[blockIdx.x * nBins + i];
-    }
-    __syncthreads();
-    
-    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
-        if (first + i < n) {
-            uint32_t val = src[first + i];
-            uint32_t st = start[CONFLICT_FREE_OFFSET(getBin(val, bit, nBins))];
-            uint32_t equalsBefore = count[first + i];
-            uint32_t pos = st + equalsBefore - 1;
-            dst[pos] = val;
-        }
+    uint32_t i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < n) {
+        uint32_t val = src[i];
+        uint32_t pos = histScan[blockIdx.x * nBins + getBin(val, bit, nBins)] + count[i] - 1;
+        dst[pos] = val;
     }
 }
 
@@ -402,7 +392,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
         // scatter
         transpose<<<gridSizeTransposeHistScan, blockSizeTranspose>>>
           (d_histScan + histSize, d_histScan, nBins, gridSize.x);
-        scatterKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET(nBins) * sizeof(uint32_t)>>>
+        scatterKernel<<<gridSize, blockSize>>>
             (d_src, n, d_dst, d_histScan, bit, nBins, d_count);
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
     }
