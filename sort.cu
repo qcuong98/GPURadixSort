@@ -325,7 +325,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     CHECK(cudaMalloc(&d_histScan, 2 * histSize * sizeof(uint32_t)));
     dim3 gridSizeScan((histSize - 1) / blockSize.x + 1);
 
-    int nStreams = 4;
+    int nStreams = 16;
     int len = (gridSize.x - 1) / nStreams + 1;
 
     cudaStream_t *streams = (cudaStream_t *) malloc(nStreams * sizeof(cudaStream_t));
@@ -336,9 +336,10 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     for (int i = 0; i < nStreams; ++i) {
         int cur_pos = i * len * blockSize.x;
         int cur_len = min(len * blockSize.x, n - i * len * blockSize.x);
+        dim3 cur_gridSize((cur_len) / blockSize.x + 1);
         CHECK(cudaMemcpyAsync(d_src + cur_pos, in + cur_pos, cur_len * sizeof(uint32_t), 
                                             cudaMemcpyHostToDevice, streams[i]));
-        sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSizeCTA2.x + nBins) * sizeof(uint32_t), streams[i]>>>
+        sortLocalKernel<<<cur_gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSizeCTA2.x + nBins) * sizeof(uint32_t), streams[i]>>>
             (d_src + cur_pos, cur_len, 0, nBins, k, d_count + cur_pos, d_hist + histSize, i * len);
     }
 
