@@ -6,9 +6,6 @@
 #define LOG_NUM_BANKS 5
 #define CONFLICT_FREE_OFFSET(n) ((n) + ((n) >> LOG_NUM_BANKS))
 
-#define BLOCKDIM_SCAN 128
-#define BLOCKDIM_SORTLOCAL 128
-
 __device__ uint32_t getBin(uint32_t val, uint32_t bit, uint32_t nBins) {
     return (val >> bit) & (nBins - 1);
 }
@@ -68,7 +65,7 @@ __global__ void scanBlkKernel(uint32_t * src, int n, uint32_t * out, uint32_t * 
 
     // reduction phase
     # pragma unroll
-    for (int stride = 1, d = BLOCKDIM_SCAN; stride <= BLOCKDIM_SCAN; stride <<= 1, d >>= 1) {
+    for (int stride = 1, d = blockDim.x; stride <= blockDim.x; stride <<= 1, d >>= 1) {
         if (threadIdx.x < d) {
             int cur = 2 * stride * (threadIdx.x + 1) - 1;
             int prev = cur - stride;
@@ -78,7 +75,7 @@ __global__ void scanBlkKernel(uint32_t * src, int n, uint32_t * out, uint32_t * 
     }
     // post-reduction phase
     # pragma unroll
-    for (int stride = BLOCKDIM_SCAN >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
+    for (int stride = blockDim.x >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
         if (threadIdx.x < d - 1) {
             int prev = 2 * stride * (threadIdx.x + 1) - 1;
             int cur = prev + stride;
@@ -196,7 +193,7 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
 
         // reduction phase
         # pragma unroll
-        for (int stride = 1, d = BLOCKDIM_SORTLOCAL; stride <= BLOCKDIM_SORTLOCAL; stride <<= 1, d >>= 1) {
+        for (int stride = 1, d = blockDim.x; stride <= blockDim.x; stride <<= 1, d >>= 1) {
             if (threadIdx.x < d) {
                 int cur = 2 * stride * (threadIdx.x + 1) - 1;
                 int prev = cur - stride;
@@ -206,7 +203,7 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
         }
         // post-reduction phase
         # pragma unroll
-        for (int stride = BLOCKDIM_SORTLOCAL >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
+        for (int stride = blockDim.x >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
             if (threadIdx.x < d - 1) {
                 int prev = 2 * stride * (threadIdx.x + 1) - 1;
                 int cur = prev + stride;
@@ -262,7 +259,7 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
 
     // reduction phase
     # pragma unroll
-    for (int stride = 1, d = BLOCKDIM_SORTLOCAL; stride <= BLOCKDIM_SORTLOCAL; stride <<= 1, d >>= 1) {
+    for (int stride = 1, d = blockDim.x; stride <= blockDim.x; stride <<= 1, d >>= 1) {
         if (threadIdx.x < d) {
             int cur = 2 * stride * (threadIdx.x + 1) - 1;
             int prev = cur - stride;
@@ -275,7 +272,7 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
     }
     // post-reduction phase
     # pragma unroll
-    for (int stride = BLOCKDIM_SORTLOCAL >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
+    for (int stride = blockDim.x >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
         if (threadIdx.x < d - 1) {
             int prev = 2 * stride * (threadIdx.x + 1) - 1;
             int cur = prev + stride;
@@ -346,7 +343,6 @@ __global__ void transpose(uint32_t *iMatrix, uint32_t *oMatrix, int rows, int co
     if (oR < cols && oC < rows)
         oMatrix[oR * rows + oC] = s_blkData[threadIdx.x][threadIdx.y];
 }
-
 
 void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     int nBins = 1 << k;
