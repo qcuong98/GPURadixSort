@@ -1,6 +1,7 @@
 #include "main.h"
 
 #define CTA_SIZE 4
+#define N_STREAMS 16
 
 #define LOG_NUM_BANKS 5
 #define CONFLICT_FREE_OFFSET(n) ((n) + ((n) >> LOG_NUM_BANKS))
@@ -162,7 +163,7 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* dst, uint32_t* his
     }
 }
 
-__global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k, uint32_t* count, uint32_t* hist) {
+__global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k, uint32_t* count, uint32_t* hist, int start_pos = 0) {
     extern __shared__ uint32_t s[];
     uint32_t* localSrc = s;
     uint32_t* localBin = s + CONFLICT_FREE_OFFSET(2 * CTA_SIZE * blockDim.x);
@@ -330,11 +331,10 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
     __syncthreads();
     
     for (int digit = threadIdx.x; digit < nBins; digit += blockDim.x)
-        hist[blockIdx.x * nBins + digit] = s_hist[CONFLICT_FREE_OFFSET(digit)];
+        hist[(blockIdx.x + start_pos) * nBins + digit] = s_hist[CONFLICT_FREE_OFFSET(digit)];
 }
 
-__global__ void transpose(uint32_t *iMatrix, uint32_t *oMatrix, int rows, int cols)
-{
+__global__ void transpose(uint32_t *iMatrix, uint32_t *oMatrix, int rows, int cols) {
     __shared__ int s_blkData[32][33];
     int iR = blockIdx.x * blockDim.x + threadIdx.y;
     int iC = blockIdx.y * blockDim.y + threadIdx.x;
@@ -357,7 +357,6 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     uint32_t * d_count;
     CHECK(cudaMalloc(&d_src, n * sizeof(uint32_t)));
     CHECK(cudaMalloc(&d_count, n * sizeof(uint32_t)));
-    CHECK(cudaMemcpy(d_src, in, n * sizeof(uint32_t), cudaMemcpyHostToDevice));
     CHECK(cudaMalloc(&d_dst, n * sizeof(uint32_t)));
 
     // Compute block and grid size for scan and scatter phase
@@ -375,11 +374,26 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     CHECK(cudaMalloc(&d_histScan, 2 * histSize * sizeof(uint32_t)));
     dim3 gridSizeScan((histSize - 1) / blockSize.x + 1);
 
+    cudaStream_t *streams = (cudaStream_t *) malloc(N_STREAMS * sizeof(cudaStream_t));    
+    for (int i = 0; i < N_STREAMS; ++i) {
+        CHECK(cudaStreamCreate(&streams[i]));
+    }
+    int len = (gridSize.x - 1) / N_STREAMS + 1;
+    for (int i = 0; i < N_STREAMS; ++i) {
+        int cur_pos = i * len * blockSize.x;
+        int cur_len = min(len * blockSize.x, n - i * len * blockSize.x);
+        dim3 cur_gridSize((cur_len) / blockSize.x + 1);
+        CHECK(cudaMemcpyAsync(d_src + cur_pos, in + cur_pos, cur_len * sizeof(uint32_t), 
+                                            cudaMemcpyHostToDevice, streams[i]));
+        sortLocalKernel<<<cur_gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSizeCTA2.x + nBins) * sizeof(uint32_t), streams[i]>>>
+            (d_src + cur_pos, cur_len, 0, nBins, k, d_count + cur_pos, d_hist + histSize, i * len);
+    }
+
     for (int bit = 0; bit < sizeof(uint32_t) * 8; bit += k) {
-        sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSizeCTA2.x + nBins) * sizeof(uint32_t)>>>
-            (d_src, n, bit, nBins, k, d_count, d_hist + histSize);
-//         printArr("src after", d_src, n);
-//         printArr("count", d_count, n);
+        if (bit) {
+            sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSizeCTA2.x + nBins) * sizeof(uint32_t)>>>
+                (d_src, n, bit, nBins, k, d_count, d_hist + histSize);
+        }
         
         transpose<<<gridSizeTransposeHist, blockSizeTranspose>>>
           (d_hist + histSize, d_hist, gridSize.x, nBins);
