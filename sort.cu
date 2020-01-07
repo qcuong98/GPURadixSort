@@ -113,7 +113,7 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* dst, uint32_t* his
     }
 }
 
-__global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k, uint32_t* count, uint32_t* hist) {
+__global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k, uint32_t* count, uint32_t* hist, int start_pos = 0) {
     extern __shared__ uint32_t s[];
     uint32_t* localSrc = s;
     uint32_t* localBin = s + CONFLICT_FREE_OFFSET(2 * CTA_SIZE * blockDim.x);
@@ -281,7 +281,7 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
     __syncthreads();
     
     for (int digit = threadIdx.x; digit < nBins; digit += blockDim.x)
-        hist[blockIdx.x * nBins + digit] = s_hist[CONFLICT_FREE_OFFSET(digit)];
+        hist[(blockIdx.x + start_pos) * nBins + digit] = s_hist[CONFLICT_FREE_OFFSET(digit)];
 }
 
 __global__ void transpose(uint32_t *iMatrix, uint32_t *oMatrix, int rows, int cols)
@@ -308,7 +308,6 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     uint32_t * d_count;
     CHECK(cudaMalloc(&d_src, n * sizeof(uint32_t)));
     CHECK(cudaMalloc(&d_count, n * sizeof(uint32_t)));
-    CHECK(cudaMemcpy(d_src, in, n * sizeof(uint32_t), cudaMemcpyHostToDevice));
     CHECK(cudaMalloc(&d_dst, n * sizeof(uint32_t)));
 
     // Compute block and grid size for scan and scatter phase
@@ -326,11 +325,31 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     CHECK(cudaMalloc(&d_histScan, 2 * histSize * sizeof(uint32_t)));
     dim3 gridSizeScan((histSize - 1) / blockSize.x + 1);
 
+    int nStreams = 4;
+    int len = (gridSize.x - 1) / nStreams + 1;
+
+    cudaStream_t *streams = (cudaStream_t *) malloc(nStreams * sizeof(cudaStream_t));
+    
+    for (int i = 0; i < nStreams; ++i) {
+        CHECK(cudaStreamCreate(&streams[i]));
+    }
+    for (int i = 0; i < nStreams; ++i) {
+        int cur_pos = i * len * blockSize.x;
+        int cur_len = min(len * blockSize.x, n - i * len * blockSize.x);
+        CHECK(cudaMemcpyAsync(d_src + cur_pos, in + cur_pos, cur_len * sizeof(uint32_t), 
+                                            cudaMemcpyHostToDevice, streams[i]));
+        sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSizeCTA2.x + nBins) * sizeof(uint32_t), streams[i]>>>
+            (d_src + cur_pos, cur_len, 0, nBins, k, d_count + cur_pos, d_hist + histSize, i * len);
+    }
+
+    // CHECK(cudaMemcpy(d_src, in, n * sizeof(uint32_t), cudaMemcpyHostToDevice));
     for (int bit = 0; bit < sizeof(uint32_t) * 8; bit += k) {
-        sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSizeCTA2.x + nBins) * sizeof(uint32_t)>>>
-            (d_src, n, bit, nBins, k, d_count, d_hist + histSize);
+        if (bit) {
+            sortLocalKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSizeCTA2.x + nBins) * sizeof(uint32_t)>>>
+                (d_src, n, bit, nBins, k, d_count, d_hist + histSize);
+        }
         transpose<<<gridSizeTransposeHist, blockSizeTranspose>>>
-          (d_hist + histSize, d_hist, gridSize.x, nBins);
+            (d_hist + histSize, d_hist, gridSize.x, nBins);
         
         // compute hist scan
         computeScanArray(d_hist, d_histScan + histSize, histSize, blockSize);
@@ -339,7 +358,7 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
         
         // scatter
         transpose<<<gridSizeTransposeHistScan, blockSizeTranspose>>>
-          (d_histScan + histSize, d_histScan, nBins, gridSize.x);
+            (d_histScan + histSize, d_histScan, nBins, gridSize.x);
         scatterKernel<<<gridSize, blockSizeCTA2, CONFLICT_FREE_OFFSET(nBins) * sizeof(uint32_t)>>>
             (d_src, n, d_dst, d_histScan, bit, nBins, d_count);
         uint32_t * tmp = d_src; d_src = d_dst; d_dst = tmp;
@@ -351,4 +370,6 @@ void sort(const uint32_t * in, int n, uint32_t * out, int k, int blkSize) {
     CHECK(cudaFree(d_dst));
     CHECK(cudaFree(d_hist));
     CHECK(cudaFree(d_histScan));
+
+    free(streams);
 }
