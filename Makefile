@@ -5,7 +5,7 @@ BLKSIZE = 128
 
 all: build run clean
 build:
-	@${CC} main.cu sort.cu thrust.cu utils.cu -DK_BITS=${K} -DBLOCKSIZE=${BLKSIZE} -o main
+	@${CC} main.cu sort.cu thrust.cu utils.cu -DK_BITS=${K} -DBLOCKSIZE=${BLKSIZE} -O2 -o main
 run:
 	@./main
 clean:
