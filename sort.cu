@@ -8,10 +8,127 @@
 #define LOG_NUM_BANKS 5
 #define CONFLICT_FREE_OFFSET(n) ((n) + ((n) >> LOG_NUM_BANKS))
 
+#include "checkers.h"
+
 __device__ uint32_t getBin(uint32_t val, uint32_t bit, uint32_t nBins) {
     return (val >> bit) & (nBins - 1);
 }
+__global__ void computeHistKernel(uint32_t * src, int n, uint32_t * hist, int nBins, int bit, int gridSize) {
+    extern __shared__ uint32_t s[];
+    uint32_t* localSrc = s;
+    uint32_t* localHist = localSrc + CONFLICT_FREE_OFFSET(ELEMENTS_PER_BLOCK);
+    
+    uint32_t first = ELEMENTS_PER_BLOCK * blockIdx.x;
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
+        int pos = first + i;
+        localSrc[CONFLICT_FREE_OFFSET(i)] = getBin(pos < n ? src[pos] : UINT_MAX, bit, nBins);
+    }
+    for (int i = threadIdx.x; i < nBins; i += blockDim.x)
+        localHist[CONFLICT_FREE_OFFSET(i)] = 0;
+    __syncthreads();
 
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
+        uint32_t bin = localSrc[CONFLICT_FREE_OFFSET(i)];
+        int pos = first + i;
+        if (pos < n)
+            atomicAdd(&localHist[CONFLICT_FREE_OFFSET(bin)], 1);
+    }
+    __syncthreads();
+
+    first = blockIdx.x * nBins;
+    for (int i = threadIdx.x; i < nBins; i += blockDim.x)
+        hist[first + i] = localHist[CONFLICT_FREE_OFFSET(i)];
+}
+
+__global__ void computeCountKernel(uint32_t* src, int n, int bit, int nBins, uint32_t* count) {
+    extern __shared__ uint32_t s[];
+    uint32_t* localSrc = s;
+    uint32_t* localBin = s + CONFLICT_FREE_OFFSET(ELEMENTS_PER_BLOCK);
+    uint32_t* localScan = localBin + CONFLICT_FREE_OFFSET(2 * BLOCKSIZE);
+    
+    int ai = threadIdx.x;
+    int bi = threadIdx.x + blockDim.x;
+    uint32_t first = ELEMENTS_PER_BLOCK * blockIdx.x;
+    
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
+        int pos = first + i;
+        localSrc[CONFLICT_FREE_OFFSET(i)] = getBin(pos < n ? src[pos] : UINT_MAX, bit, nBins);
+    }
+    __syncthreads();
+    
+    uint32_t tempA[CTA_SIZE], tempB[CTA_SIZE], countA[CTA_SIZE], countB[CTA_SIZE];
+    #pragma unroll
+    for (int i = 0; i < CTA_SIZE; ++i) {
+        tempA[i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)]; 
+        tempB[i] = localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)]; 
+        countA[i] = countB[i] = 1;
+        if (i) {
+            if (tempA[i] == tempA[i - 1])
+                countA[i] += countA[i - 1];
+            if (tempB[i] == tempB[i - 1])
+                countB[i] += countB[i - 1];
+        }
+    }
+
+    localScan[CONFLICT_FREE_OFFSET(ai)] = countA[CTA_SIZE - 1];
+    localScan[CONFLICT_FREE_OFFSET(bi)] = countB[CTA_SIZE - 1];
+    localBin[CONFLICT_FREE_OFFSET(ai)] = tempA[CTA_SIZE - 1];
+    localBin[CONFLICT_FREE_OFFSET(bi)] = tempB[CTA_SIZE - 1];
+    __syncthreads();
+
+    // reduction phase
+    # pragma unroll
+    for (int stride = 1, d = BLOCKSIZE; stride <= BLOCKSIZE; stride <<= 1, d >>= 1) {
+        if (threadIdx.x < d) {
+            int cur = 2 * stride * (threadIdx.x + 1) - 1;
+            int prev = cur - stride;
+            cur = CONFLICT_FREE_OFFSET(cur);
+            prev = CONFLICT_FREE_OFFSET(prev);
+            if (localBin[cur] == localBin[prev])
+                localScan[cur] += localScan[prev];
+        }
+        __syncthreads();
+    }
+    // post-reduction phase
+    # pragma unroll
+    for (int stride = BLOCKSIZE >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
+        if (threadIdx.x < d - 1) {
+            int prev = 2 * stride * (threadIdx.x + 1) - 1;
+            int cur = prev + stride;
+            cur = CONFLICT_FREE_OFFSET(cur);
+            prev = CONFLICT_FREE_OFFSET(prev);
+            if (localBin[cur] == localBin[prev])
+                localScan[cur] += localScan[prev];
+        }
+        __syncthreads();
+    }
+
+    uint32_t lastBinA = localBin[CONFLICT_FREE_OFFSET(ai - 1)];
+    uint32_t lastBinB = localBin[CONFLICT_FREE_OFFSET(bi - 1)];
+    uint32_t lastScanA = ai ? localScan[CONFLICT_FREE_OFFSET(ai - 1)] : 0;
+    uint32_t lastScanB = localScan[CONFLICT_FREE_OFFSET(bi - 1)];
+    __syncthreads();
+    
+    #pragma unroll
+    for (int i = 0; i < CTA_SIZE; ++i) {
+        if (tempA[i] == lastBinA)
+            countA[i] += lastScanA;
+        
+        if (tempB[i] == lastBinB)
+            countB[i] += lastScanB;
+        
+        localScan[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)] = countA[i];
+        localScan[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)] = countB[i];
+    }
+    __syncthreads();
+    
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
+        int pos = first + i;
+        if (pos < n)
+            count[pos] = localScan[CONFLICT_FREE_OFFSET(i)];
+    }
+}
+ 
 __global__ void scanBlkKernel(uint32_t * src, int n, uint32_t * out, uint32_t * blkSums) {
     extern __shared__ uint32_t s[];
     uint32_t* localScan = s;
@@ -103,7 +220,7 @@ __global__ void reduceKernel(uint32_t * in, int n, uint32_t * out) {
         out[id_in] -= in[id_in];
 }
 
-void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 elementsPerBlock, dim3 blockSize) {
+void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 elementsPerBlock, dim3 blockSize, cudaStream_t& stream) {
     dim3 gridSize((n - 1) / elementsPerBlock.x + 1);
 
     uint32_t * d_blkSums;
@@ -111,12 +228,12 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 elementsPerBl
     uint32_t * d_sum_blkSums;
     CHECK(cudaMalloc(&d_sum_blkSums, gridSize.x * sizeof(uint32_t)));
 
-    scanBlkKernel<<<gridSize, blockSize, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 2) * blockSize.x) * sizeof(uint32_t)>>>
+    scanBlkKernel<<<gridSize, blockSize, CONFLICT_FREE_OFFSET((2 * CTA_SIZE + 2) * blockSize.x) * sizeof(uint32_t), stream>>>
         (d_in, n, d_out, d_blkSums);
     if (gridSize.x != 1) {
-        computeScanArray(d_blkSums, d_sum_blkSums, gridSize.x, elementsPerBlock, blockSize);
+        computeScanArray(d_blkSums, d_sum_blkSums, gridSize.x, elementsPerBlock, blockSize, stream);
     }
-    sumPrefixBlkKernel<<<gridSize, blockSize>>>(d_out, n, d_sum_blkSums);
+    sumPrefixBlkKernel<<<gridSize, blockSize, 0, stream>>>(d_out, n, d_sum_blkSums);
 
     CHECK(cudaFree(d_sum_blkSums));
     CHECK(cudaFree(d_blkSums));
@@ -141,12 +258,10 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* dst, uint32_t* his
     }
 }
 
-__global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k, uint32_t* count, uint32_t* hist, int start_pos = 0) {
+__global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k) {
     extern __shared__ uint32_t s[];
     uint32_t* localSrc = s;
-    uint32_t* localBin = s + CONFLICT_FREE_OFFSET(ELEMENTS_PER_BLOCK);
-    uint32_t* localScan = localBin + CONFLICT_FREE_OFFSET(2 * BLOCKSIZE);
-    uint32_t* s_hist = localScan + CONFLICT_FREE_OFFSET(ELEMENTS_PER_BLOCK);
+    uint32_t* localScan = localSrc + CONFLICT_FREE_OFFSET(ELEMENTS_PER_BLOCK);
 
     int ai = threadIdx.x;
     int bi = threadIdx.x + blockDim.x;
@@ -221,100 +336,11 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
         __syncthreads();
     }
     
-    // -------------------------------------------------------------------
-    // countEqualsBefore
-    uint32_t countA[CTA_SIZE], countB[CTA_SIZE];
-    #pragma unroll
-    for (int i = 0; i < CTA_SIZE; ++i) {
-        tempA[i] = getBin(localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)], bit, nBins); 
-        tempB[i] = getBin(localSrc[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)], bit, nBins); 
-        countA[i] = countB[i] = 1;
-        if (i) {
-            if (tempA[i] == tempA[i - 1])
-                countA[i] += countA[i - 1];
-            if (tempB[i] == tempB[i - 1])
-                countB[i] += countB[i - 1];
-        }
-    }
-
-    localScan[CONFLICT_FREE_OFFSET(ai)] = countA[CTA_SIZE - 1];
-    localScan[CONFLICT_FREE_OFFSET(bi)] = countB[CTA_SIZE - 1];
-    localBin[CONFLICT_FREE_OFFSET(ai)] = tempA[CTA_SIZE - 1];
-    localBin[CONFLICT_FREE_OFFSET(bi)] = tempB[CTA_SIZE - 1];
-    __syncthreads();
-
-    // reduction phase
-    # pragma unroll
-    for (int stride = 1, d = BLOCKSIZE; stride <= BLOCKSIZE; stride <<= 1, d >>= 1) {
-        if (threadIdx.x < d) {
-            int cur = 2 * stride * (threadIdx.x + 1) - 1;
-            int prev = cur - stride;
-            cur = CONFLICT_FREE_OFFSET(cur);
-            prev = CONFLICT_FREE_OFFSET(prev);
-            if (localBin[cur] == localBin[prev])
-                localScan[cur] += localScan[prev];
-        }
-        __syncthreads();
-    }
-    // post-reduction phase
-    # pragma unroll
-    for (int stride = BLOCKSIZE >> 1, d = 2; stride >= 1; stride >>= 1, d <<= 1) {
-        if (threadIdx.x < d - 1) {
-            int prev = 2 * stride * (threadIdx.x + 1) - 1;
-            int cur = prev + stride;
-            cur = CONFLICT_FREE_OFFSET(cur);
-            prev = CONFLICT_FREE_OFFSET(prev);
-            if (localBin[cur] == localBin[prev])
-                localScan[cur] += localScan[prev];
-        }
-        __syncthreads();
-    }
-
-    uint32_t lastBinA = localBin[CONFLICT_FREE_OFFSET(ai - 1)];
-    uint32_t lastBinB = localBin[CONFLICT_FREE_OFFSET(bi - 1)];
-    uint32_t lastScanA = ai ? localScan[CONFLICT_FREE_OFFSET(ai - 1)] : 0;
-    uint32_t lastScanB = localScan[CONFLICT_FREE_OFFSET(bi - 1)];
-    __syncthreads();
-    
-    #pragma unroll
-    for (int i = 0; i < CTA_SIZE; ++i) {
-        if (tempA[i] == lastBinA)
-            countA[i] += lastScanA;
-        
-        if (tempB[i] == lastBinB)
-            countB[i] += lastScanB;
-        
-        localScan[CONFLICT_FREE_OFFSET(CTA_SIZE * ai + i)] = countA[i];
-        localScan[CONFLICT_FREE_OFFSET(CTA_SIZE * bi + i)] = countB[i];
-    }
-    __syncthreads();
-    
     for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
         int pos = first + i;
-        if (pos < n) {
-            count[pos] = localScan[CONFLICT_FREE_OFFSET(i)];
+        if (pos < n)
             src[pos] = localSrc[CONFLICT_FREE_OFFSET(i)];
-        }
     }
-    
-    // -------------------------------------------
-    // compute hist
-    for (int idx = threadIdx.x; idx < nBins; idx += blockDim.x)
-        s_hist[CONFLICT_FREE_OFFSET(idx)] = 0;
-    __syncthreads();
-    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
-        int pos = first + i;
-        if (pos < n) {
-            uint32_t thisBin = getBin(localSrc[CONFLICT_FREE_OFFSET(i)], bit, nBins);
-          if (pos == n - 1 || i == ELEMENTS_PER_BLOCK - 1 || thisBin != getBin(localSrc[CONFLICT_FREE_OFFSET(i + 1)], bit, nBins))
-              s_hist[CONFLICT_FREE_OFFSET(thisBin)] = localScan[CONFLICT_FREE_OFFSET(i)];
-        }
-    }
-    __syncthreads();
-    
-    first = (blockIdx.x + start_pos) * nBins;
-    for (int digit = threadIdx.x; digit < nBins; digit += blockDim.x)
-        hist[first + digit] = s_hist[CONFLICT_FREE_OFFSET(digit)];
 }
 
 __global__ void transpose(uint32_t *iMatrix, uint32_t *oMatrix, int rows, int cols) {
@@ -356,7 +382,7 @@ void sort(const uint32_t * in, int n, uint32_t * out) {
 
     cudaStream_t *streams = (cudaStream_t *) malloc(N_STREAMS * sizeof(cudaStream_t));    
     for (int i = 0; i < N_STREAMS; ++i) {
-        CHECK(cudaStreamCreate(&streams[i]));
+        CHECK(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
     }
     int len = (gridSize.x - 1) / N_STREAMS + 1;
     for (int i = 0; i < N_STREAMS; ++i) {
@@ -367,26 +393,35 @@ void sort(const uint32_t * in, int n, uint32_t * out) {
         dim3 cur_gridSize((cur_len - 1) / elementsPerBlock.x + 1);
         CHECK(cudaMemcpyAsync(d_src + cur_pos, in + cur_pos, cur_len * sizeof(uint32_t), 
                                             cudaMemcpyHostToDevice, streams[i]));
-        sortLocalKernel<<<cur_gridSize, blockSize, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSize.x + nBins) * sizeof(uint32_t), streams[i]>>>
-            (d_src + cur_pos, cur_len, 0, nBins, K_BITS, d_count + cur_pos, d_hist + histSize, i * len);
+        sortLocalKernel<<<cur_gridSize, blockSize, CONFLICT_FREE_OFFSET(2 * ELEMENTS_PER_BLOCK) * sizeof(uint32_t), streams[i]>>>
+            (d_src + cur_pos, cur_len, 0, nBins, K_BITS);
     }
-
+    
     for (int bit = 0; bit < 32; bit += K_BITS) {
         if (bit) {
-            sortLocalKernel<<<gridSize, blockSize, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * BLOCKSIZE + nBins) * sizeof(uint32_t)>>>
-                (d_src, n, bit, nBins, K_BITS, d_count, d_hist + histSize);
+            sortLocalKernel<<<gridSize, blockSize, CONFLICT_FREE_OFFSET(2 * ELEMENTS_PER_BLOCK) * sizeof(uint32_t)>>>
+                (d_src, n, bit, nBins, K_BITS);
         }
+        CHECK(cudaDeviceSynchronize());
         
-        transpose<<<gridSizeTransposeHist, blockSizeTranspose>>>
+        computeCountKernel<<<gridSize, blockSize, CONFLICT_FREE_OFFSET(2 * ELEMENTS_PER_BLOCK + 2 * BLOCKSIZE) * sizeof(uint32_t), streams[1]>>>
+            (d_src, n, bit, nBins, d_count);
+        
+        computeHistKernel<<<gridSize, blockSize, CONFLICT_FREE_OFFSET(ELEMENTS_PER_BLOCK + nBins) * sizeof(uint32_t), streams[0]>>>
+          (d_src, n, d_hist + histSize, nBins, bit, gridSize.x);
+        
+        transpose<<<gridSizeTransposeHist, blockSizeTranspose, 0, streams[0]>>>
           (d_hist + histSize, d_hist, gridSize.x, nBins);
 
         // compute hist scan
-        computeScanArray(d_hist, d_histScan + histSize, histSize, elementsPerBlock, blockSize);
-        reduceKernel<<<gridSizeScan, blockSize>>>
+        computeScanArray(d_hist, d_histScan + histSize, histSize, elementsPerBlock, blockSize, streams[0]);
+        reduceKernel<<<gridSizeScan, blockSize, 0, streams[0]>>>
             (d_hist, histSize, d_histScan + histSize);
         
-        transpose<<<gridSizeTransposeHistScan, blockSizeTranspose>>>
+        transpose<<<gridSizeTransposeHistScan, blockSizeTranspose, 0, streams[0]>>>
           (d_histScan + histSize, d_histScan, nBins, gridSize.x);
+        
+        CHECK(cudaDeviceSynchronize());
         
         // scatter
         scatterKernel<<<gridSize, blockSize, CONFLICT_FREE_OFFSET(nBins) * sizeof(uint32_t)>>>
