@@ -6,7 +6,7 @@ int main(int argc, char ** argv) {
     printDeviceInfo();
 
     // SET UP INPUT SIZE
-    int n = (1 << 24) + 1;
+    int n = atoi(argv[1]);
     printf("\nInput size: %d\n", n);
 
     // SET UP K
