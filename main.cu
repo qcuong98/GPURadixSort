@@ -10,7 +10,7 @@ int main(int argc, char ** argv) {
     printf("\nInput size: %d\n", n);
 
     // SET UP K
-    int k = atoi(argv[1]);
+    int k = K_BITS; // atoi(argv[1]);
     printf("\nNum bits per digit: %d\n", k);
 
     // ALLOCATE MEMORIES
@@ -25,7 +25,7 @@ int main(int argc, char ** argv) {
     // printArray(in, n);
 
     // DETERMINE BLOCK SIZES
-    int blockSize = atoi(argv[2]);
+    int blockSize = BLOCKSIZE; // atoi(argv[2]);
     printf("\nBlock size for all kernels: %d\n", blockSize);
 
     // SORT BY THRUST
@@ -39,7 +39,7 @@ int main(int argc, char ** argv) {
     // SORT BY OUR IMPLEMENTATION
     GpuTimer our_timer;
     our_timer.Start();
-    sort(in, n, out, k, blockSize);
+    sort(in, n, out);
     our_timer.Stop();
     printf("Our Time: %.3f ms\n", our_timer.Elapsed());
     // printArray(out, n);

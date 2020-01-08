@@ -18,7 +18,7 @@
 
 void printDeviceInfo();
 void checkCorrectness(uint32_t * out, uint32_t * correctOut, int n);
-void sort(const uint32_t * in, int n, uint32_t * out, int k, int blockSize);
+void sort(const uint32_t * in, int n, uint32_t * out);
 void sortByThrust(const uint32_t * in, int n, uint32_t * out);
 
 #endif
