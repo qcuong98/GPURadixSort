@@ -2,7 +2,7 @@ CC = nvcc
 PROF = nvprof
 K = 8
 BLKSIZE = 256
-CTA = 4
+CTA = 2
 STREAMS = 16
 N = 16777217
 
