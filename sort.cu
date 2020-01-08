@@ -4,6 +4,7 @@
 #define CTA_SIZE 4
 #define N_STREAMS 16
 
+#define ELEMENTS_PER_BLOCK (2 * CTA_SIZE * BLOCKSIZE)
 #define LOG_NUM_BANKS 5
 #define CONFLICT_FREE_OFFSET(n) ((n) + ((n) >> LOG_NUM_BANKS))
 
@@ -19,8 +20,9 @@ __global__ void scanBlkKernel(uint32_t * src, int n, uint32_t * out, uint32_t * 
     int ai = threadIdx.x;
     int bi = threadIdx.x + blockDim.x;
     
-    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
-        int pos = (2 * CTA_SIZE * blockDim.x) * blockIdx.x + i;
+    uint32_t first = ELEMENTS_PER_BLOCK * blockIdx.x;
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
+        int pos = first + i;
         localScan[CONFLICT_FREE_OFFSET(i)] = pos < n ? src[pos] : 0;
     }
     __syncthreads();
@@ -76,8 +78,7 @@ __global__ void scanBlkKernel(uint32_t * src, int n, uint32_t * out, uint32_t * 
     }
     __syncthreads();
     
-    uint32_t first = 2 * CTA_SIZE * blockDim.x * blockIdx.x;
-    for (int i = threadIdx.x; i < 2 * CTA_SIZE * BLOCKSIZE; i += BLOCKSIZE) {
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
         if (first + i < n)
             out[first + i] = localScan[CONFLICT_FREE_OFFSET(i)];
     }
@@ -89,8 +90,8 @@ __global__ void scanBlkKernel(uint32_t * src, int n, uint32_t * out, uint32_t * 
 
 __global__ void sumPrefixBlkKernel(uint32_t * out, int n, uint32_t * blkSums) {
     uint32_t lastBlockSum = blockIdx.x > 0 ? blkSums[blockIdx.x - 1] : 0;
-    uint32_t first = 2 * CTA_SIZE * blockDim.x * blockIdx.x;
-    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
+    uint32_t first = ELEMENTS_PER_BLOCK * blockIdx.x;
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
         if (first + i < n)
             out[first + i] += lastBlockSum;
     }
@@ -123,13 +124,13 @@ void computeScanArray(uint32_t* d_in, uint32_t* d_out, int n, dim3 elementsPerBl
 
 __global__ void scatterKernel(uint32_t* src, int n, uint32_t* dst, uint32_t* histScan, int bit, int nBins, uint32_t* count) {
     extern __shared__ uint32_t start[];
-    uint32_t first = 2 * CTA_SIZE * blockDim.x * blockIdx.x;
+    uint32_t first = ELEMENTS_PER_BLOCK * blockIdx.x;
     for (int i = threadIdx.x; i < nBins; i += blockDim.x) {
         start[CONFLICT_FREE_OFFSET(i)] = histScan[blockIdx.x * nBins + i];
     }
     __syncthreads();
     
-    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
         if (first + i < n) {
             uint32_t val = src[first + i];
             uint32_t st = start[CONFLICT_FREE_OFFSET(getBin(val, bit, nBins))];
@@ -143,20 +144,21 @@ __global__ void scatterKernel(uint32_t* src, int n, uint32_t* dst, uint32_t* his
 __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k, uint32_t* count, uint32_t* hist, int start_pos = 0) {
     extern __shared__ uint32_t s[];
     uint32_t* localSrc = s;
-    uint32_t* localBin = s + CONFLICT_FREE_OFFSET(2 * CTA_SIZE * blockDim.x);
-    uint32_t* localScan = localBin + CONFLICT_FREE_OFFSET(2 * blockDim.x);
+    uint32_t* localBin = s + CONFLICT_FREE_OFFSET(ELEMENTS_PER_BLOCK);
+    uint32_t* localScan = localBin + CONFLICT_FREE_OFFSET(2 * BLOCKSIZE);
+    uint32_t* s_hist = localScan + CONFLICT_FREE_OFFSET(ELEMENTS_PER_BLOCK);
 
     int ai = threadIdx.x;
     int bi = threadIdx.x + blockDim.x;
-    uint32_t elementsPerBlock = 2 * CTA_SIZE * BLOCKSIZE;
-    uint32_t first = elementsPerBlock * blockIdx.x;
+    uint32_t first = ELEMENTS_PER_BLOCK * blockIdx.x;
     
-    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
         int pos = first + i;
         localSrc[CONFLICT_FREE_OFFSET(i)] = pos < n ? src[pos] : UINT_MAX;
     }
     __syncthreads();
 
+    // radix sort with k = 1
     uint32_t tempA[CTA_SIZE], tempB[CTA_SIZE];
     #pragma unroll
     for (int b = 0; b < K_BITS; ++b) {
@@ -197,7 +199,7 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
         }
         
         // scatter
-        int n0 = 2 * CTA_SIZE * blockDim.x - localScan[CONFLICT_FREE_OFFSET(2 * blockDim.x - 1)];
+        int n0 = ELEMENTS_PER_BLOCK - localScan[CONFLICT_FREE_OFFSET(2 * blockDim.x - 1)];
         
         valA = localScan[CONFLICT_FREE_OFFSET(ai)];
         valB = localScan[CONFLICT_FREE_OFFSET(bi)];
@@ -287,7 +289,7 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
     }
     __syncthreads();
     
-    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
         int pos = first + i;
         if (pos < n) {
             count[pos] = localScan[CONFLICT_FREE_OFFSET(i)];
@@ -297,15 +299,14 @@ __global__ void sortLocalKernel(uint32_t* src, int n, int bit, int nBins, int k,
     
     // -------------------------------------------
     // compute hist
-    uint32_t* s_hist = localScan + CONFLICT_FREE_OFFSET(2 * CTA_SIZE * BLOCKSIZE);
     for (int idx = threadIdx.x; idx < nBins; idx += blockDim.x)
         s_hist[CONFLICT_FREE_OFFSET(idx)] = 0;
     __syncthreads();
-    for (int i = threadIdx.x; i < 2 * CTA_SIZE * blockDim.x; i += blockDim.x) {
+    for (int i = threadIdx.x; i < ELEMENTS_PER_BLOCK; i += blockDim.x) {
         int pos = first + i;
         if (pos < n) {
             uint32_t thisBin = getBin(localSrc[CONFLICT_FREE_OFFSET(i)], bit, nBins);
-          if (pos == n - 1 || i == elementsPerBlock - 1 || thisBin != getBin(localSrc[CONFLICT_FREE_OFFSET(i + 1)], bit, nBins))
+          if (pos == n - 1 || i == ELEMENTS_PER_BLOCK - 1 || thisBin != getBin(localSrc[CONFLICT_FREE_OFFSET(i + 1)], bit, nBins))
               s_hist[CONFLICT_FREE_OFFSET(thisBin)] = localScan[CONFLICT_FREE_OFFSET(i)];
         }
     }
@@ -342,7 +343,7 @@ void sort(const uint32_t * in, int n, uint32_t * out) {
 
     // Compute block and grid size for scan and scatter phase
     dim3 blockSize(BLOCKSIZE);
-    dim3 elementsPerBlock(blockSize.x * CTA_SIZE * 2);
+    dim3 elementsPerBlock(ELEMENTS_PER_BLOCK);
     dim3 gridSize((n - 1) / elementsPerBlock.x + 1);
     dim3 blockSizeTranspose(32, 32);
     dim3 gridSizeTransposeHist((gridSize.x - 1) / blockSizeTranspose.x + 1, (nBins - 1) / blockSizeTranspose.x + 1);
@@ -372,7 +373,7 @@ void sort(const uint32_t * in, int n, uint32_t * out) {
 
     for (int bit = 0; bit < 32; bit += K_BITS) {
         if (bit) {
-            sortLocalKernel<<<gridSize, blockSize, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * blockSize.x + nBins) * sizeof(uint32_t)>>>
+            sortLocalKernel<<<gridSize, blockSize, CONFLICT_FREE_OFFSET((4 * CTA_SIZE + 2) * BLOCKSIZE + nBins) * sizeof(uint32_t)>>>
                 (d_src, n, bit, nBins, K_BITS, d_count, d_hist + histSize);
         }
         
